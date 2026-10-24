@@ -1,0 +1,20 @@
+version: "2"
+linters:
+  enable:
+    - errorlint    # errors compared with == instead of errors.Is
+    - gocritic
+    - misspell
+    - revive
+    - unconvert
+    - usestdlibvars
+  exclusions:
+    presets:
+      - std-error-handling  # allow unchecked fmt.Fprint*/Close in output code
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/blashkar/portcullis
