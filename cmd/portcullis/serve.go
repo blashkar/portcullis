@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,6 +23,8 @@ import (
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
 	"github.com/blashkar/portcullis/internal/gateway"
+	"github.com/blashkar/portcullis/internal/inject"
+	"github.com/blashkar/portcullis/internal/ollama"
 	"github.com/blashkar/portcullis/internal/pin"
 )
 
@@ -44,7 +50,9 @@ Before a tool call is forwarded, the policy in the config file decides
 whether it may go ahead. Tools are pinned and scanned before they are
 offered: one whose definition changed since it was approved, or that looks
 poisoned, is held back ("portcullis pin" reviews and approves changes).
-Secrets in what servers send back are redacted. Every message, with the
+Secrets in what servers send back are redacted, and results are checked
+for prompt injection, optionally with a local guard model through Ollama.
+Every message, with the
 policy's decision, is logged and recorded in a SQLite audit log, which
 "portcullis audit" searches.`,
 		Example: `  portcullis serve --config portcullis.yaml
@@ -101,6 +109,19 @@ func runServe(ctx context.Context, opts serveOptions) error {
 	if redactor == nil {
 		log.Warn("secret redaction is off")
 	}
+	if cfg.Inject.Action != "off" {
+		gwOpts.Inject = gateway.InjectOptions{
+			Detector: &inject.Detector{GuardAll: cfg.Inject.Guard.Check != "suspicious"},
+			Action:   gateway.InjectAction(cmp.Or(cfg.Inject.Action, string(gateway.InjectWarn))),
+		}
+		if g := cfg.Inject.Guard; g.Enabled {
+			guard, err := newGuard(ctx, g, log)
+			if err != nil {
+				return err
+			}
+			gwOpts.Inject.Detector.Guard = guard
+		}
+	}
 	if path := cfg.AuditPath(); path != "" {
 		store, err := audit.Open(path, cfg.MaxPayload())
 		if err != nil {
@@ -155,6 +176,44 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		return ctx.Err()
 	}
 	return err
+}
+
+// newGuard sets up the guard model. Whether the model is there is checked in
+// the background: until it answers, and whenever it fails, results are
+// checked with the patterns alone.
+func newGuard(ctx context.Context, g config.Guard, log *slog.Logger) (*inject.Guard, error) {
+	client, err := ollama.NewClient(cmp.Or(g.Host, os.Getenv("OLLAMA_HOST")), nil)
+	if err != nil {
+		return nil, fmt.Errorf("inject.guard.host: %w", err)
+	}
+	guard := inject.NewGuard(client, inject.GuardOptions{Model: g.Model, Timeout: g.Timeout})
+	if !isLoopback(client.Host()) {
+		log.Warn("the guard model's Ollama isn't on this machine: tool results will be sent to it", "host", client.Host())
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if _, err := client.Show(ctx, guard.Model()); err != nil {
+			log.Error("the guard model isn't available; checking results with patterns only",
+				"model", guard.Model(), "err", err, "hint", "ollama pull "+guard.Model())
+			return
+		}
+		log.Info("guard model ready", "model", guard.Model(), "host", client.Host())
+	}()
+	return guard, nil
+}
+
+// isLoopback reports whether a URL's host is this machine.
+func isLoopback(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Hostname() == "localhost" {
+		return true
+	}
+	ip, err := netip.ParseAddr(u.Hostname())
+	return err == nil && ip.IsLoopback()
 }
 
 // connectAll starts the upstream servers in parallel. If any fails, serve

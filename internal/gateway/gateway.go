@@ -10,7 +10,8 @@
 //
 // Tools are checked before they are offered: a tool whose definition
 // changed since it was pinned, or that looks poisoned, is held back. Secrets
-// in tool results, resources and prompts are redacted on the way back.
+// in tool results, resources and prompts are redacted on the way back, and
+// results are checked for prompt injection.
 //
 // When an upstream's tool, prompt or resource list changes, the gateway
 // picks up the new list and the client is told; when an upstream exits,
@@ -63,6 +64,7 @@ type Options struct {
 	PinPoll  time.Duration // how often to look for approvals; 0 means DefaultPinPoll
 	Scan     ScanOptions
 	Redactor *redact.Redactor // nil turns redaction off
+	Inject   InjectOptions
 
 	// OnClientInfo is called once the client has said who it is.
 	OnClientInfo func(name, version string)
@@ -333,7 +335,7 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 			RequestState:   req.Params.RequestState,
 		})
 		g.redactToolResult(ctx, res)
-		return res, err
+		return g.checkToolResult(ctx, req.Params.Name, res), err
 	}
 }
 
@@ -524,6 +526,11 @@ func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
 		}
 		res, err := s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
 		g.redactResource(ctx, res)
+		if err == nil {
+			if berr := g.checkResource(ctx, req.Params.URI, res); berr != nil {
+				return nil, berr
+			}
+		}
 		return res, err
 	}
 }
@@ -620,9 +627,14 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 			if note.held != "" {
 				e.Decision, e.Reason = audit.DecisionHeld, note.held
 			}
+			var findings []string
 			if len(note.redacted) > 0 {
-				e.Findings = "redacted: " + note.redacted.String()
+				findings = append(findings, "redacted: "+note.redacted.String())
 			}
+			if note.injection != "" {
+				findings = append(findings, note.injection)
+			}
+			e.Findings = strings.Join(findings, "; ")
 			g.logEvent(e)
 			g.record(context.WithoutCancel(ctx), e)
 			return res, err

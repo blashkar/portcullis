@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -56,6 +57,7 @@ type Config struct {
 	Pins   Pins        `yaml:"pins"`
 	Scan   Scan        `yaml:"scan"`
 	Redact Redact      `yaml:"redact"`
+	Inject Inject      `yaml:"inject"`
 
 	// Dir is the directory of the config file. Relative paths in the config
 	// are resolved against it, so a client can start portcullis from anywhere.
@@ -105,6 +107,29 @@ type Redact struct {
 	Disabled bool `yaml:"disabled"`
 	// Patterns are extra secrets to redact, after the built-in ones.
 	Patterns []RedactPattern `yaml:"patterns"`
+}
+
+// Inject configures prompt-injection checks on tool results and resources.
+type Inject struct {
+	// Action is what happens to a result that looks like an injection:
+	// "warn" (the default) puts a warning before it, "block" withholds it,
+	// "log" only records it, and "off" skips the checks.
+	Action string `yaml:"action"`
+	Guard  Guard  `yaml:"guard"`
+}
+
+// Guard configures the guard model: a local model, through Ollama, that
+// judges text the patterns don't catch.
+type Guard struct {
+	Enabled bool `yaml:"enabled"`
+	// Model defaults to inject.DefaultModel.
+	Model string `yaml:"model"`
+	// Host is Ollama's URL; "" means OLLAMA_HOST, or localhost.
+	Host string `yaml:"host"`
+	// Check is "all" (the default) to ask about every result, or
+	// "suspicious" to ask only about results a pattern noticed.
+	Check   string        `yaml:"check"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // RedactPattern is a custom secret format. A group named "secret" limits
@@ -184,6 +209,19 @@ func (c *Config) validate() error {
 	}
 	if _, err := c.Redactor(); err != nil {
 		errs = append(errs, err)
+	}
+	switch c.Inject.Action {
+	case "", "warn", "block", "log", "off":
+	default:
+		errs = append(errs, fmt.Errorf("inject.action must be warn, block, log or off, not %q", c.Inject.Action))
+	}
+	switch c.Inject.Guard.Check {
+	case "", "all", "suspicious":
+	default:
+		errs = append(errs, fmt.Errorf("inject.guard.check must be all or suspicious, not %q", c.Inject.Guard.Check))
+	}
+	if c.Inject.Guard.Timeout < 0 {
+		errs = append(errs, errors.New("inject.guard.timeout can't be negative"))
 	}
 	return errors.Join(errs...)
 }

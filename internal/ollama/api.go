@@ -56,6 +56,12 @@ type ChatRequest struct {
 	Tools    []Tool    `json:"tools,omitempty"`
 	// Options are model parameters such as temperature, seed and num_ctx.
 	Options map[string]any `json:"options,omitempty"`
+	// Format constrains the reply: a JSON Schema the response must match,
+	// or "json" for any JSON.
+	Format json.RawMessage `json:"format,omitempty"`
+	// KeepAlive is how long the model stays loaded after the request, such
+	// as "5m"; "" leaves Ollama's default.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // ChatResponse is one chunk of a streamed chat response. The final chunk has
