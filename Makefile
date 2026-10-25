@@ -1,10 +1,10 @@
-BIN := bin/portcullis
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build test fuzz lint fmt clean
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/portcullis
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/portcullis ./cmd/portcullis
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/portcullis-agent ./cmd/portcullis-agent
 
 test:
 	go test -race ./...
