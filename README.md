@@ -19,14 +19,16 @@ portcullis runs in front of your MCP servers, inspects the JSON-RPC traffic in b
 ## Quickstart
 
 ```sh
-go install github.com/blashkar/portcullis/cmd/portcullis@latest
+git clone https://github.com/blashkar/portcullis && cd portcullis
+make build     # bin/portcullis and bin/portcullis-agent
+make sandbox   # Docker images of the official MCP servers; see below
 ```
 
-Put `portcullis wrap --` in front of the command that starts your MCP server. For example, with Claude Code:
+Put `portcullis wrap --` in front of the command that starts your MCP server. For example, the sandboxed filesystem server with Claude Code:
 
 ```sh
-claude mcp add fs -- portcullis wrap --log-file /home/user/portcullis.log -- \
-  npx -y @modelcontextprotocol/server-filesystem /home/user/project
+claude mcp add fs -- /home/user/portcullis/bin/portcullis wrap --log-file /home/user/portcullis.log -- \
+  /home/user/portcullis/sandbox/run.sh filesystem
 ```
 
 Or in any client's JSON config (`.mcp.json`, Claude Desktop, Cursor and others):
@@ -35,15 +37,47 @@ Or in any client's JSON config (`.mcp.json`, Claude Desktop, Cursor and others):
 {
   "mcpServers": {
     "fs": {
-      "command": "portcullis",
+      "command": "/home/user/portcullis/bin/portcullis",
       "args": ["wrap", "--log-file", "/home/user/portcullis.log", "--",
-               "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/project"]
+               "/home/user/portcullis/sandbox/run.sh", "filesystem"]
     }
   }
 }
 ```
 
-The client talks to portcullis as if it were the server. Everything after `--` is the real server's command, and its flags stay its own.
+The client talks to portcullis as if it were the server. Everything after `--` is the real server's command, and its flags stay its own. portcullis works with any stdio server, but read the next section before running one directly on your machine.
+
+## Sandboxed MCP servers
+
+An MCP server runs with your permissions. Its "allowed directories" are a check in its own code, not a boundary: the official filesystem server had two escapes in 2025 (CVE-2025-53109 and CVE-2025-53110, a symlink and a path-prefix bypass), and a malicious or compromised package can ignore its configuration entirely. portcullis inspects the messages, which protects you from a tricked *model*, not from a malicious server *process*. So the servers used here run in Docker, set up so they can't touch the host at all:
+
+- **Built from source at a pinned commit.** `make sandbox` builds the official [filesystem, git and everything servers](https://github.com/modelcontextprotocol/servers) from a fixed commit that Docker fetches straight from GitHub. (The prebuilt `mcp/filesystem` image on Docker Hub was built from a release that predates the fixes above.)
+- **No host files, ever.** No volumes or bind mounts. The demo workspace (a small project for filesystem, a throwaway repository for git) is created inside the image by a Dockerfile built with no build context, so nothing from your disk can be copied in. It's copied into a fresh in-memory `/workspace` on every start, so each session starts clean and nothing persists.
+- **Locked down.** [`sandbox/run.sh`](sandbox/run.sh) runs each server with no network, a read-only root filesystem, no Linux capabilities, `no-new-privileges`, a non-root user, and memory, CPU and process limits. `--init` makes sure the container stops when portcullis stops the server.
+- **The only link is stdio**, the stream portcullis inspects.
+
+[`sandbox/check.sh`](sandbox/check.sh) checks all of this from inside a running container: no mounts, no Docker socket, no network interface up but loopback, no connection to the host (Ollama), the Docker host by address on macOS or Linux, or the internet, not root, no capabilities, read-only root, and the container gone after SIGTERM. The connection probes are control-tested: the same probe in a container *with* a network connects.
+
+```text
+$ sandbox/check.sh filesystem
+ok    no volumes or bind mounts
+ok    network mode is none
+ok    not privileged
+ok    no Docker socket inside
+ok    no network interface up except loopback
+ok    runs as a non-root user
+ok    no capabilities
+ok    no privilege escalation
+ok    root filesystem is read-only
+ok    workspace is writable
+ok    can't connect to host.docker.internal 11434
+ok    can't connect to 192.168.65.254 11434
+ok    can't connect to 172.17.0.1 11434
+ok    can't connect to 1.1.1.1 443
+ok    container is gone after SIGTERM
+```
+
+What's left is a Docker or kernel exploit, which is outside this project's threat model, and anything a model can be talked into doing with the tools it has inside the sandbox, which is what portcullis's policy and scanners are for. The upstream Dockerfiles use floating base-image tags (`node:24-alpine`, `python:3.12-slim-bookworm`), so a rebuild can pick up newer base images.
 
 ## A fully local agent: portcullis-agent
 
@@ -53,20 +87,19 @@ You don't need a cloud AI client to use portcullis. `portcullis-agent` is a smal
 go install github.com/blashkar/portcullis/cmd/portcullis-agent@latest
 ollama pull llama3.2:3b   # the default; any model with the "tools" capability works
 
-portcullis-agent -- portcullis wrap --log-file portcullis.log -- \
-  npx -y @modelcontextprotocol/server-filesystem /home/user/project
+bin/portcullis-agent -- bin/portcullis wrap --log-file portcullis.log -- sandbox/run.sh filesystem
 ```
 
 That chain is agent → portcullis → server, so every call the model makes passes through the proxy. Use `-p "question"` to ask one question and exit; only the answer goes to stdout. In the chat, `/tools` lists the tools, `/reset` clears the conversation, and `/quit` or Ctrl-D exits.
 
-A real one-shot run with `llama3.2:3b` (tool calls and results are shown on stderr):
+A real one-shot run with `llama3.2:3b` against the sandboxed filesystem server (tool calls and results are shown on stderr):
 
 ```text
-$ portcullis-agent -p "What is the secret word in note.txt? The allowed directory is /home/user/ws" -- \
-    portcullis wrap --log-file portcullis.log -- npx -y @modelcontextprotocol/server-filesystem /home/user/ws
-  -> read_file {"path":"/home/user/ws/note.txt"}
-  <- read_file: 29 bytes: the secret word is marmalade
-The secret word in note.txt is "marmalade".
+$ bin/portcullis-agent -p "When is the meeting? The notes are in /workspace/project/docs/meeting.txt" -- \
+    bin/portcullis wrap -- sandbox/run.sh filesystem
+  -> read_text_file {"path":"/workspace/project/docs/meeting.txt"}
+  <- read_text_file: 31 bytes: Meeting moved to Thursday 3pm.
+The meeting has been rescheduled to Thursday at 3pm. You can find the updated details in the meeting.txt file located at /workspace/project/docs/meeting.txt.
 ```
 
 How the agent behaves:
@@ -78,18 +111,18 @@ How the agent behaves:
 
 ## What it logs
 
-One line per message, with its direction and method, and the tool name for `tools/call`. Responses are matched to their requests, so each one carries the method and the round-trip time. These lines are from a real Claude Code session that read a file through the filesystem server (timestamps and byte counts trimmed; the full session also has discovery messages):
+One line per message, with its direction and method, and the tool name for `tools/call`. Responses are matched to their requests, so each one carries the method and the round-trip time. These lines are from the agent run above (timestamps and byte counts trimmed):
 
 ```text
-msg="session started" session=K6UQZTSVLPS6 server=npx pid=18624
-msg=message dir=client->server kind=request id=1 method=tools/list
-msg=message dir=server->client kind=response id=1 method=tools/list duration=2.26ms
+msg="session started" session=HN76YZOLDHSS server=sandbox/run.sh pid=34049
+msg=message dir=client->server kind=request id=2 method=tools/list
+msg=message dir=server->client kind=response id=2 method=tools/list duration=4.695417ms
 msg=message dir=client->server kind=request id=3 method=tools/call tool=read_text_file
-msg=message dir=server->client kind=response id=3 method=tools/call duration=2.323ms tool=read_text_file
-msg="session ended" reason=signal client_to_server=6 server_to_client=6 invalid=0 dropped=0 exit_code=1
+msg=message dir=server->client kind=response id=3 method=tools/call duration=5.673333ms tool=read_text_file
+msg="session ended" reason="client closed" duration=910ms client_to_server=3 server_to_client=3 invalid=0 dropped=0 exit_code=0
 ```
 
-Claude Code ends a session by sending SIGTERM, which portcullis passes on, so `reason=signal`; `npx` exits with 1 when it's terminated.
+Clients end sessions differently: the agent closes the server's stdin (`reason="client closed"`), while Claude Code sends SIGTERM, which portcullis passes on (`reason=signal`).
 
 Message bodies aren't logged by default, because tool arguments and results can contain secrets. `--log-payloads 500` logs the first 500 bytes of each one. Log files are created with mode `0600`.
 
@@ -133,6 +166,7 @@ flowchart LR
 make test   # go test -race ./...
 make lint   # golangci-lint
 make fuzz   # short fuzzing pass over the JSON-RPC parser and line reader
+make sandbox && sandbox/check.sh filesystem   # build and verify the sandboxed servers
 ```
 
 No test needs Ollama or the network. The end-to-end tests build the binaries and run them against fakes: portcullis in front of a fake server (the test binary re-executed), covering relaying, exit codes, shutdown escalation and log files; and the full agent → portcullis → MCP server chain with a fake Ollama, covering one-shot and chat mode. The Ollama client's tests replay streams recorded from a real server.

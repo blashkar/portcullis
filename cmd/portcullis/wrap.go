@@ -34,7 +34,7 @@ between it and the client on portcullis's own stdin and stdout.
 
 Point your MCP client at portcullis instead of the server, and put the
 server's command after "--".`,
-		Example: `  portcullis wrap -- npx -y @modelcontextprotocol/server-filesystem /home/user/project
+		Example: `  portcullis wrap -- sandbox/run.sh filesystem
   portcullis wrap --log-file portcullis.log -- ./my-server --verbose`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
