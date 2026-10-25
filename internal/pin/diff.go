@@ -70,8 +70,9 @@ func Diff(before, after []string) []string {
 func diffMiddle(before, after []string) []string {
 	n, m := len(before), len(after)
 	var out []string
-	if n > 0 && m > maxDiffCells/n {
-		// Too big to align: show everything removed, then everything added.
+	if n == 0 || m == 0 || n > maxDiffCells || m > maxDiffCells || n*m > maxDiffCells {
+		// Nothing to align, or too much: show everything removed, then
+		// everything added.
 		for _, l := range before {
 			out = append(out, "- "+l)
 		}
