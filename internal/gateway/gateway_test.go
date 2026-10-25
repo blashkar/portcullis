@@ -261,12 +261,12 @@ func TestToolListChanges(t *testing.T) {
 	if err != nil || text(res) != "clean" {
 		t.Fatalf("new tool: %+v, %v", res, err)
 	}
-	h.clientMu.Lock()
-	changed := h.changed
-	h.clientMu.Unlock()
-	if changed == 0 {
-		t.Error("the client got no tools/list_changed notification")
-	}
+	// The notification can arrive after the new list is already visible.
+	eventually(t, "a tools/list_changed notification", func() bool {
+		h.clientMu.Lock()
+		defer h.clientMu.Unlock()
+		return h.changed > 0
+	})
 
 	// And removes one.
 	servers["git"].RemoveTools("git_log")
