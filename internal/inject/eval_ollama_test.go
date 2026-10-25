@@ -4,7 +4,7 @@
 //
 //	go test -tags ollama -run TestEvaluate -v ./internal/inject
 //
-// PORTCULLIS_GUARD_MODEL picks the model (default llama3.2:3b) and
+// PORTCULLIS_GUARD_MODEL picks the model (default gemma3:4b) and
 // OLLAMA_HOST the server.
 package inject
 

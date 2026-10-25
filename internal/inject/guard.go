@@ -47,8 +47,10 @@ type GuardOptions struct {
 	Concurrency int
 }
 
-// DefaultModel is small enough to answer in about a second on a laptop.
-const DefaultModel = "llama3.2:3b"
+// DefaultModel answers in under a second on a laptop. Of the small models
+// evaluated (see the README) it caught the most injections; it flags a few
+// more ordinary texts than llama3.2:3b did.
+const DefaultModel = "gemma3:4b"
 
 const (
 	cacheSize = 1024
