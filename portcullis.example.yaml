@@ -1,0 +1,15 @@
+# portcullis serve --config portcullis.example.yaml
+#
+# Each server runs in a locked-down Docker container (see sandbox/run.sh):
+# no host files, no network. Build the images first with `make sandbox`.
+servers:
+  fs:
+    command: [sandbox/run.sh, filesystem]
+  git:
+    command: [sandbox/run.sh, git]
+  everything:
+    command: [sandbox/run.sh, everything]
+
+audit:
+  path: portcullis.db       # relative to this file; created with mode 0600
+  max_payload: 65536        # bytes of each message's params and result to keep

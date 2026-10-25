@@ -2,3 +2,5 @@
 /dist/
 coverage.out
 *.log
+portcullis.db*
+/portcullis.yaml

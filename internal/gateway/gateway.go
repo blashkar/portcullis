@@ -1,0 +1,559 @@
+// Package gateway puts several upstream MCP servers behind one MCP server.
+//
+// The client sees a single server. Each upstream's tools and prompts appear
+// with the upstream's name as a prefix (fs__read_file), so two servers can
+// both have a read_file tool. Resources keep their URIs and are routed by
+// them. Calls are forwarded to the upstream that owns the name, and every
+// message is logged and, if a Recorder is set, written to the audit log.
+//
+// When an upstream's tool, prompt or resource list changes, the gateway
+// picks up the new list and the client is told; when an upstream exits,
+// its tools disappear and the others keep working.
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/blashkar/portcullis/internal/audit"
+	"github.com/blashkar/portcullis/internal/config"
+)
+
+// Recorder stores audit events. *audit.Store implements it.
+type Recorder interface {
+	Record(ctx context.Context, e audit.Event) error
+}
+
+// Options configure a Gateway.
+type Options struct {
+	Version   string
+	SessionID string
+	Logger    *slog.Logger
+	Recorder  Recorder // nil disables the audit log
+
+	// OnClientInfo is called once the client has said who it is.
+	OnClientInfo func(name, version string)
+}
+
+// Gateway is the aggregating MCP server.
+type Gateway struct {
+	opts   Options
+	log    *slog.Logger
+	server *mcp.Server
+
+	mu        sync.Mutex
+	upstreams map[string]*upstream
+	// resources maps each resource URI to the upstream that owns it.
+	resources map[string]string
+	client    *mcp.ServerSession
+	gotClient bool
+	closing   bool // Close was called, so upstreams exiting is expected
+}
+
+type upstream struct {
+	name    string
+	session *mcp.ClientSession // nil once the upstream has exited
+	caps    *mcp.ServerCapabilities
+
+	// syncMu serializes refreshes of this upstream's lists.
+	syncMu    sync.Mutex
+	tools     map[string]bool // client-facing names
+	prompts   map[string]bool
+	resources map[string]bool // URIs
+}
+
+// New returns a Gateway with no upstreams.
+func New(opts Options) *Gateway {
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	g := &Gateway{
+		opts:      opts,
+		log:       opts.Logger,
+		upstreams: map[string]*upstream{},
+		resources: map[string]string{},
+	}
+	g.server = mcp.NewServer(&mcp.Implementation{Name: "portcullis", Version: opts.Version}, &mcp.ServerOptions{
+		Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{ListChanged: true},
+			Prompts:   &mcp.PromptCapabilities{ListChanged: true},
+			Resources: &mcp.ResourceCapabilities{ListChanged: true},
+		},
+	})
+	g.server.AddReceivingMiddleware(g.observe(audit.ClientToServer))
+	g.server.AddSendingMiddleware(g.observe(audit.ServerToClient))
+	return g
+}
+
+// Connect connects to an upstream server over t, which for a child process
+// is an *mcp.CommandTransport, and adds its tools, prompts and resources.
+func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) error {
+	u := &upstream{name: name, tools: map[string]bool{}, prompts: map[string]bool{}, resources: map[string]bool{}}
+	refresh := func(sync func(context.Context, *upstream) error) {
+		// Fetch the new list outside the notification handler, which runs on
+		// the session's read loop.
+		go func() {
+			if err := sync(context.Background(), u); err != nil {
+				g.log.Warn("refreshing upstream lists", "upstream", name, "err", err)
+			}
+		}()
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "portcullis", Version: g.opts.Version}, &mcp.ClientOptions{
+		// No roots: portcullis doesn't expose the client's filesystem to upstreams.
+		Capabilities:               &mcp.ClientCapabilities{},
+		ToolListChangedHandler:     func(context.Context, *mcp.ToolListChangedRequest) { refresh(g.syncTools) },
+		PromptListChangedHandler:   func(context.Context, *mcp.PromptListChangedRequest) { refresh(g.syncPrompts) },
+		ResourceListChangedHandler: func(context.Context, *mcp.ResourceListChangedRequest) { refresh(g.syncResources) },
+		ProgressNotificationHandler: func(ctx context.Context, r *mcp.ProgressNotificationClientRequest) {
+			// Progress tokens are chosen by the client and passed through
+			// unchanged, so the notification can go back as it is.
+			if ss := g.clientSession(); ss != nil {
+				_ = ss.NotifyProgress(ctx, r.Params)
+			}
+		},
+	})
+	session, err := client.Connect(ctx, t, nil)
+	if err != nil {
+		return fmt.Errorf("connecting to %s: %w", name, err)
+	}
+	u.session = session
+	if res := session.InitializeResult(); res != nil {
+		u.caps = res.Capabilities
+	}
+
+	g.mu.Lock()
+	if _, dup := g.upstreams[name]; dup {
+		g.mu.Unlock()
+		_ = session.Close()
+		return fmt.Errorf("upstream %s is already connected", name)
+	}
+	g.upstreams[name] = u
+	g.mu.Unlock()
+
+	if err := errors.Join(g.syncTools(ctx, u), g.syncPrompts(ctx, u), g.syncResources(ctx, u)); err != nil {
+		return fmt.Errorf("listing %s's features: %w", name, err)
+	}
+	go func() {
+		err := session.Wait()
+		g.upstreamExited(u, err)
+	}()
+	g.log.Info("upstream connected", "upstream", name, "tools", len(u.tools), "prompts", len(u.prompts), "resources", len(u.resources))
+	return nil
+}
+
+// Serve serves one client over t until it disconnects or ctx is cancelled.
+func (g *Gateway) Serve(ctx context.Context, t mcp.Transport) error {
+	return g.server.Run(ctx, t)
+}
+
+// Close disconnects from every upstream, which stops their processes.
+func (g *Gateway) Close() error {
+	g.mu.Lock()
+	g.closing = true
+	var sessions []*mcp.ClientSession
+	for _, u := range g.upstreams {
+		if u.session != nil {
+			sessions = append(sessions, u.session)
+		}
+	}
+	g.mu.Unlock()
+
+	var wg sync.WaitGroup
+	errs := make([]error, len(sessions))
+	for i, s := range sessions {
+		wg.Go(func() { errs[i] = s.Close() })
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// Tools returns the client-facing tool names, sorted.
+func (g *Gateway) Tools() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var names []string
+	for _, u := range g.upstreams {
+		names = append(names, slices.Collect(maps.Keys(u.tools))...)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// session returns the upstream's session, or an error if it has exited.
+func (g *Gateway) session(name string) (*mcp.ClientSession, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	u := g.upstreams[name]
+	if u == nil || u.session == nil {
+		return nil, fmt.Errorf("server %s is not available", name)
+	}
+	return u.session, nil
+}
+
+func (g *Gateway) clientSession() *mcp.ServerSession {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.client
+}
+
+// prefixed returns the client-facing name of an upstream's tool or prompt.
+func prefixed(upstream, name string) string {
+	return upstream + config.Separator + name
+}
+
+// splitName splits a client-facing name into upstream and original name.
+// ok is false, and upstream "", if the name has no prefix.
+func splitName(name string) (upstream, original string, ok bool) {
+	upstream, original, ok = strings.Cut(name, config.Separator)
+	if !ok {
+		return "", name, false
+	}
+	return upstream, original, true
+}
+
+func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
+	if u.caps == nil || u.caps.Tools == nil {
+		return nil
+	}
+	u.syncMu.Lock()
+	defer u.syncMu.Unlock()
+	s, err := g.session(u.name)
+	if err != nil {
+		return nil // it exited; upstreamExited cleans up
+	}
+
+	var tools []*mcp.Tool
+	for t, err := range s.Tools(ctx, nil) {
+		if err != nil {
+			return err
+		}
+		tools = append(tools, t)
+	}
+
+	seen := map[string]bool{}
+	for _, t := range tools {
+		name := prefixed(u.name, t.Name)
+		ft := *t
+		ft.Name = name
+		if !validObjectSchema(ft.InputSchema) {
+			g.log.Warn("skipping tool with an invalid input schema", "upstream", u.name, "tool", t.Name)
+			continue
+		}
+		g.server.AddTool(&ft, g.toolHandler(u.name, t.Name))
+		seen[name] = true
+	}
+	g.server.RemoveTools(stale(u.tools, seen)...)
+	g.mu.Lock()
+	u.tools = seen
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s, err := g.session(upstream)
+		if err != nil {
+			return nil, err
+		}
+		return s.CallTool(ctx, &mcp.CallToolParams{
+			Meta:           req.Params.Meta,
+			Name:           tool,
+			Arguments:      req.Params.Arguments,
+			InputResponses: req.Params.InputResponses,
+			RequestState:   req.Params.RequestState,
+		})
+	}
+}
+
+func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
+	if u.caps == nil || u.caps.Prompts == nil {
+		return nil
+	}
+	u.syncMu.Lock()
+	defer u.syncMu.Unlock()
+	s, err := g.session(u.name)
+	if err != nil {
+		return nil // it exited; upstreamExited cleans up
+	}
+
+	var prompts []*mcp.Prompt
+	for p, err := range s.Prompts(ctx, nil) {
+		if err != nil {
+			return err
+		}
+		prompts = append(prompts, p)
+	}
+	seen := map[string]bool{}
+	for _, p := range prompts {
+		name := prefixed(u.name, p.Name)
+		fp := *p
+		fp.Name = name
+		original := p.Name
+		g.server.AddPrompt(&fp, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			s, err := g.session(u.name)
+			if err != nil {
+				return nil, err
+			}
+			return s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
+		})
+		seen[name] = true
+	}
+	g.server.RemovePrompts(stale(u.prompts, seen)...)
+	g.mu.Lock()
+	u.prompts = seen
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *Gateway) syncResources(ctx context.Context, u *upstream) error {
+	if u.caps == nil || u.caps.Resources == nil {
+		return nil
+	}
+	u.syncMu.Lock()
+	defer u.syncMu.Unlock()
+	s, err := g.session(u.name)
+	if err != nil {
+		return nil // it exited; upstreamExited cleans up
+	}
+
+	var resources []*mcp.Resource
+	for r, err := range s.Resources(ctx, nil) {
+		if err != nil {
+			return err
+		}
+		resources = append(resources, r)
+	}
+	seen := map[string]bool{}
+	for _, r := range resources {
+		g.mu.Lock()
+		owner, taken := g.resources[r.URI]
+		if !taken {
+			g.resources[r.URI] = u.name
+		}
+		g.mu.Unlock()
+		if taken && owner != u.name {
+			// URIs aren't namespaced, so the first server to offer one keeps it.
+			g.log.Warn("skipping resource another server already offers", "upstream", u.name, "uri", r.URI, "owner", owner)
+			continue
+		}
+		if err := addResource(g.server, r, g.resourceHandler(u.name)); err != nil {
+			g.log.Warn("skipping resource", "upstream", u.name, "uri", r.URI, "err", err)
+			continue
+		}
+		seen[r.URI] = true
+	}
+	gone := stale(u.resources, seen)
+	g.server.RemoveResources(gone...)
+	g.mu.Lock()
+	for _, uri := range gone {
+		delete(g.resources, uri)
+	}
+	u.resources = seen
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
+	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		s, err := g.session(upstream)
+		if err != nil {
+			return nil, err
+		}
+		return s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
+	}
+}
+
+// addResource adds r, turning the SDK's panic on an invalid URI into an error.
+func addResource(s *mcp.Server, r *mcp.Resource, h mcp.ResourceHandler) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("invalid resource: %v", p)
+		}
+	}()
+	s.AddResource(r, h)
+	return nil
+}
+
+// upstreamExited removes an upstream's features once its session has ended.
+func (g *Gateway) upstreamExited(u *upstream, err error) {
+	g.mu.Lock()
+	u.session = nil
+	tools := slices.Collect(maps.Keys(u.tools))
+	prompts := slices.Collect(maps.Keys(u.prompts))
+	uris := slices.Collect(maps.Keys(u.resources))
+	for _, uri := range uris {
+		delete(g.resources, uri)
+	}
+	u.tools, u.prompts, u.resources = map[string]bool{}, map[string]bool{}, map[string]bool{}
+
+	closing := g.closing
+	g.mu.Unlock()
+
+	g.server.RemoveTools(tools...)
+	g.server.RemovePrompts(prompts...)
+	g.server.RemoveResources(uris...)
+	if closing {
+		g.log.Info("upstream closed", "upstream", u.name)
+		g.record(context.Background(), audit.Event{Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/closed"})
+		return
+	}
+	g.log.Warn("upstream disconnected", "upstream", u.name, "err", err, "tools_removed", len(tools))
+	g.record(context.Background(), audit.Event{
+		Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/disconnected",
+		Error: errString(err), IsError: true,
+	})
+}
+
+// stale returns the names in old that aren't in current.
+func stale(old, current map[string]bool) []string {
+	var out []string
+	for name := range old {
+		if !current[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// validObjectSchema reports whether s is a JSON Schema for an object, which
+// the SDK requires of every tool's input.
+func validObjectSchema(s any) bool {
+	m, ok := s.(map[string]any)
+	return ok && m["type"] == "object"
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// observe returns middleware that logs every message going in dir and
+// records it in the audit log.
+func (g *Gateway) observe(dir string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if dir == audit.ClientToServer {
+				g.noteClient(req)
+			}
+			start := time.Now()
+			res, err := next(ctx, method, req)
+			e := audit.Event{Time: start, Direction: dir, Method: method, Duration: time.Since(start), Error: errString(err), IsError: err != nil}
+			g.describe(&e, req.GetParams(), res)
+			g.logEvent(e)
+			g.record(context.WithoutCancel(ctx), e)
+			return res, err
+		}
+	}
+}
+
+// describe fills in an event's tool, upstream and payloads.
+func (g *Gateway) describe(e *audit.Event, params mcp.Params, res mcp.Result) {
+	switch p := params.(type) {
+	case *mcp.CallToolParamsRaw:
+		e.Tool = p.Name
+		e.Upstream, _, _ = splitName(p.Name)
+	case *mcp.GetPromptParams:
+		e.Upstream, _, _ = splitName(p.Name)
+	case *mcp.ReadResourceParams:
+		g.mu.Lock()
+		e.Upstream = g.resources[p.URI]
+		g.mu.Unlock()
+	}
+	if r, ok := res.(*mcp.CallToolResult); ok && r != nil && r.IsError {
+		e.IsError = true
+	}
+	if g.opts.Recorder != nil {
+		e.Params = marshal(params)
+		e.Result = marshal(res)
+	}
+}
+
+func marshal(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil || string(b) == "null" {
+		return ""
+	}
+	return string(b)
+}
+
+func (g *Gateway) logEvent(e audit.Event) {
+	attrs := []any{"dir", e.Direction, "method", e.Method, "duration", e.Duration}
+	if e.Tool != "" {
+		attrs = append(attrs, "tool", e.Tool)
+	}
+	if e.Upstream != "" {
+		attrs = append(attrs, "upstream", e.Upstream)
+	}
+	if e.IsError {
+		attrs = append(attrs, "failed", true)
+	}
+	if e.Error != "" {
+		attrs = append(attrs, "error", e.Error)
+	}
+	g.log.Info("message", attrs...)
+}
+
+func (g *Gateway) record(ctx context.Context, e audit.Event) {
+	if g.opts.Recorder == nil {
+		return
+	}
+	e.SessionID = g.opts.SessionID
+	if err := g.opts.Recorder.Record(ctx, e); err != nil {
+		g.log.Error("writing the audit log", "err", err)
+	}
+}
+
+// noteClient remembers the client's session, for forwarding notifications,
+// and reports who the client is the first time it says so.
+func (g *Gateway) noteClient(req mcp.Request) {
+	ss, _ := req.GetSession().(*mcp.ServerSession)
+	g.mu.Lock()
+	if ss != nil {
+		g.client = ss
+	}
+	known := g.gotClient
+	g.mu.Unlock()
+	if known || g.opts.OnClientInfo == nil {
+		return
+	}
+
+	// The initialize request carries clientInfo; newer protocol revisions
+	// send it with other requests' params, so look for it in any of them.
+	var info struct {
+		ClientInfo *mcp.Implementation `json:"clientInfo"`
+	}
+	if b, err := json.Marshal(req.GetParams()); err == nil {
+		_ = json.Unmarshal(b, &info)
+	}
+	if info.ClientInfo == nil && ss != nil {
+		if p := ss.InitializeParams(); p != nil {
+			info.ClientInfo = p.ClientInfo
+		}
+	}
+	if info.ClientInfo == nil || info.ClientInfo.Name == "" {
+		return
+	}
+	// Requests are handled concurrently: report the client only once.
+	g.mu.Lock()
+	first := !g.gotClient
+	g.gotClient = true
+	g.mu.Unlock()
+	if first {
+		g.opts.OnClientInfo(info.ClientInfo.Name, info.ClientInfo.Version)
+	}
+}
