@@ -69,18 +69,22 @@ func Diff(before, after []string) []string {
 
 func diffMiddle(before, after []string) []string {
 	n, m := len(before), len(after)
-	var out []string
-	if n == 0 || m == 0 || n > maxDiffCells || m > maxDiffCells || n*m > maxDiffCells {
-		// Nothing to align, or too much: show everything removed, then
-		// everything added.
-		for _, l := range before {
-			out = append(out, "- "+l)
-		}
-		for _, l := range after {
-			out = append(out, "+ "+l)
-		}
-		return out
+	// Nothing to align, or too much: show everything removed, then
+	// everything added. (Separate checks, so static analysis can see that
+	// n and m are bounded before they size the table.)
+	if n == 0 || m == 0 {
+		return replaceAll(before, after)
 	}
+	if n > maxDiffCells {
+		return replaceAll(before, after)
+	}
+	if m > maxDiffCells {
+		return replaceAll(before, after)
+	}
+	if n*m > maxDiffCells {
+		return replaceAll(before, after)
+	}
+	var out []string
 	// Longest common subsequence, by dynamic programming.
 	lcs := make([][]int, n+1)
 	for i := range lcs {
@@ -109,6 +113,17 @@ func diffMiddle(before, after []string) []string {
 			out = append(out, "+ "+after[j])
 			j++
 		}
+	}
+	return out
+}
+
+func replaceAll(before, after []string) []string {
+	var out []string
+	for _, l := range before {
+		out = append(out, "- "+l)
+	}
+	for _, l := range after {
+		out = append(out, "+ "+l)
 	}
 	return out
 }
