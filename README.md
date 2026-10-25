@@ -253,17 +253,23 @@ inject:
 
 With `warn`, the result gets a fixed warning in front, telling the model it's data and not instructions. The warning never quotes the guard's reason or the matched text, because both come from the tool result and the warning is the part the model should trust. With `block`, the model gets a tool error instead; with `log`, nothing changes but the audit log records it (`portcullis audit --flagged`).
 
-**How well it works.** `internal/inject/testdata` has two labeled sets of realistic tool outputs: 25 ordinary and 25 injections that I used while writing the patterns, and a held-out set of 15 and 15 written afterwards and never used for tuning. Measured against Ollama with `llama3.2:3b` (`go test -tags ollama -run TestEvaluate -v ./internal/inject`):
+**How well it works.** `internal/inject/testdata` has two labeled sets of realistic tool outputs: 25 ordinary and 25 injections that I used while writing the patterns, and a held-out set of 15 and 15 written afterwards and never used for tuning. Measured against Ollama with two guard models (`PORTCULLIS_GUARD_MODEL=<model> go test -tags ollama -run TestEvaluate -v ./internal/inject`), with the same prompt:
 
-| | Tuning set: caught | false alarms | Held-out set: caught | false alarms |
-|---|---|---|---|---|
-| Patterns only | 22 / 25 | 1 / 25 | 2 / 15 | 0 / 15 |
-| Guard model only | 9 / 25 | 0 / 25 | 5 / 15 | 0 / 15 |
-| Both (what portcullis does) | 22 / 25 | 1 / 25 | **6 / 15** | **0 / 15** |
+| | Tuning set: caught | false alarms | Held-out set: caught | false alarms | Guard median |
+|---|---|---|---|---|---|
+| Patterns only | 22 / 25 | 1 / 25 | 2 / 15 | 0 / 15 | |
+| Guard `llama3.2:3b` only | 9 / 25 | 0 / 25 | 5 / 15 | 0 / 15 | 475 ms |
+| Both, with `llama3.2:3b` (the default) | 22 / 25 | 1 / 25 | **6 / 15** | **0 / 15** | |
+| Guard `qwen3:30b-a3b-instruct-2507` only | 25 / 25 | 0 / 25 | 15 / 15 | 0 / 15 | 824 ms |
+| Both, with `qwen3:30b-a3b-instruct-2507` | 25 / 25 | 1 / 25 | **15 / 15** | **0 / 15** | |
 
-The guard took about 0.5 s per check (median 475 ms on the held-out set). The held-out row is the honest one. The patterns do well on phrasings like the ones they were written from and poorly on new ones, and a 3B model catches only some subtle injections. In a real run against the sandboxed filesystem server, an HTML comment telling "AI agents" to ignore their instructions was caught by the patterns in 7 ms. A politely worded request to "automated helpers going through this changelog" to paste a deploy key was missed by both layers. The one false alarm is an article that quotes an injection phrase. It would get a warning, not be blocked.
+The held-out columns are the honest ones. The patterns do well on phrasings like the ones they were written from and poorly on new ones. The 3B model catches only some subtle injections. The 30B model (a mixture of experts with about 3B active parameters, so it answers in under a second, but it needs about 18 GB of memory while loaded) caught everything in both sets without a false alarm. Forty-five injections is a small sample, and I wrote them all, so read that as "much better", not "solved".
 
-I tried prompts that push the 3B model harder: quote the suspicious sentence first, add worked examples, ask whom each sentence addresses. The first caught 18 of 25 on the tuning set, but it also flagged 7 of the 25 ordinary samples, such as a how-to, terms of service and a security advisory. The worked examples were worse: at least 12 false alarms before that run hit a reply that never ended, which is why replies are now capped. Asking whom each sentence addresses caught fewer injections, not more. Warnings on that many results would train people to ignore them, so the cautious prompt stayed. The model is configurable, and a larger one should do better. Treat this layer as defense in depth, behind the sandbox and the policy, not as a guarantee.
+The same difference showed in a real run against the sandboxed filesystem server. An HTML comment telling "AI agents" to ignore their instructions was caught by the patterns in 7 ms, whichever model was configured. A politely worded request to "automated helpers going through this changelog" to paste a deploy key was missed by the patterns and by `llama3.2:3b`. `qwen3:30b-a3b-instruct-2507` caught it in 910 ms. The one false alarm is an article that quotes an injection phrase, flagged by the patterns. It would get a warning, not be blocked.
+
+The default is the 3B model because it fits next to whatever else uses the machine's Ollama. If you have the memory, set `guard.model` to the larger one.
+
+I tried prompts that push the 3B model harder: quote the suspicious sentence first, add worked examples, ask whom each sentence addresses. The first caught 18 of 25 on the tuning set, but it also flagged 7 of the 25 ordinary samples, such as a how-to, terms of service and a security advisory. The worked examples were worse: at least 12 false alarms before that run hit a reply that never ended, which is why replies are now capped. Asking whom each sentence addresses caught fewer injections, not more. Warnings on that many results would train people to ignore them, so the cautious prompt stayed. Whatever the model, treat this layer as defense in depth, behind the sandbox and the policy, not as a guarantee: an attacker can iterate on phrasings against the same open model.
 
 ## Audit log
 
