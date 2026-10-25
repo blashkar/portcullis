@@ -70,32 +70,29 @@ func Diff(before, after []string) []string {
 func diffMiddle(before, after []string) []string {
 	n, m := len(before), len(after)
 	// Nothing to align, or too much: show everything removed, then
-	// everything added. (Separate checks, so static analysis can see that
-	// n and m are bounded before they size the table.)
-	if n == 0 || m == 0 {
-		return replaceAll(before, after)
-	}
-	if n > maxDiffCells {
-		return replaceAll(before, after)
-	}
-	if m > maxDiffCells {
-		return replaceAll(before, after)
-	}
-	if n*m > maxDiffCells {
+	// everything added.
+	if n == 0 || m == 0 || n > maxDiffCells || m > maxDiffCells || n*m > maxDiffCells {
 		return replaceAll(before, after)
 	}
 	var out []string
-	// Longest common subsequence, by dynamic programming.
-	lcs := make([][]int, n+1)
-	for i := range lcs {
-		lcs[i] = make([]int, m+1)
+	// Longest common subsequence, by dynamic programming. lcs(i, j) is the
+	// length of the LCS of before[i:] and after[j:]; past either end it's 0.
+	table := make([][]int, n)
+	for i := range table {
+		table[i] = make([]int, m)
+	}
+	lcs := func(i, j int) int {
+		if i >= n || j >= m {
+			return 0
+		}
+		return table[i][j]
 	}
 	for i := n - 1; i >= 0; i-- {
 		for j := m - 1; j >= 0; j-- {
 			if before[i] == after[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
+				table[i][j] = lcs(i+1, j+1) + 1
 			} else {
-				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+				table[i][j] = max(lcs(i+1, j), lcs(i, j+1))
 			}
 		}
 	}
@@ -106,7 +103,7 @@ func diffMiddle(before, after []string) []string {
 			out = append(out, "  "+before[i])
 			i++
 			j++
-		case i < n && (j == m || lcs[i+1][j] >= lcs[i][j+1]):
+		case i < n && (j == m || lcs(i+1, j) >= lcs(i, j+1)):
 			out = append(out, "- "+before[i])
 			i++
 		default:
