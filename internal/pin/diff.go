@@ -38,12 +38,49 @@ func (d Definition) Lines() []string {
 	return out
 }
 
+// maxDiffCells caps the LCS table Diff builds. A server controls its tool
+// definitions, so it could otherwise make reviewing them take all the
+// reviewer's memory.
+const maxDiffCells = 1 << 22
+
 // Diff returns a line diff from before to after: unchanged lines start with
 // two spaces, removed ones with "- " and added ones with "+ ".
 func Diff(before, after []string) []string {
-	// Longest common subsequence, by dynamic programming. Definitions are a
-	// few hundred lines at most.
+	// Lines the two share at the start and end are unchanged; only the
+	// middle needs the LCS table.
+	pre := 0
+	for pre < len(before) && pre < len(after) && before[pre] == after[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(before)-pre && suf < len(after)-pre && before[len(before)-1-suf] == after[len(after)-1-suf] {
+		suf++
+	}
+	var out []string
+	for _, l := range before[:pre] {
+		out = append(out, "  "+l)
+	}
+	out = append(out, diffMiddle(before[pre:len(before)-suf], after[pre:len(after)-suf])...)
+	for _, l := range before[len(before)-suf:] {
+		out = append(out, "  "+l)
+	}
+	return out
+}
+
+func diffMiddle(before, after []string) []string {
 	n, m := len(before), len(after)
+	var out []string
+	if n > 0 && m > maxDiffCells/n {
+		// Too big to align: show everything removed, then everything added.
+		for _, l := range before {
+			out = append(out, "- "+l)
+		}
+		for _, l := range after {
+			out = append(out, "+ "+l)
+		}
+		return out
+	}
+	// Longest common subsequence, by dynamic programming.
 	lcs := make([][]int, n+1)
 	for i := range lcs {
 		lcs[i] = make([]int, m+1)
@@ -57,7 +94,6 @@ func Diff(before, after []string) []string {
 			}
 		}
 	}
-	var out []string
 	i, j := 0, 0
 	for i < n || j < m {
 		switch {

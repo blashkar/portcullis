@@ -2,6 +2,7 @@ package pin
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,5 +221,42 @@ func TestTrim(t *testing.T) {
 	}
 	if got := Trim([]string{"  a", "  b"}, 3); strings.Join(got, "|") != "  ..." {
 		t.Errorf("no changes: %v", got)
+	}
+}
+
+func TestDiffOfHugeDefinitions(t *testing.T) {
+	// 50,000 changed lines each side would need a 2.5-billion-cell table.
+	var before, after []string
+	for i := range 50_000 {
+		before = append(before, fmt.Sprintf("old %d", i))
+		after = append(after, fmt.Sprintf("new %d", i))
+	}
+	before = append([]string{"same"}, before...)
+	after = append([]string{"same"}, after...)
+	start := time.Now()
+	d := Diff(before, after)
+	if len(d) != 100_001 || d[0] != "  same" || d[1] != "- old 0" || d[50_001] != "+ new 0" {
+		t.Errorf("diff has %d lines: %v ...", len(d), d[:3])
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("took %v", time.Since(start))
+	}
+}
+
+func TestDiffEdges(t *testing.T) {
+	for _, tt := range []struct {
+		before, after []string
+		want          string
+	}{
+		{nil, nil, ""},
+		{nil, []string{"a"}, "+ a"},
+		{[]string{"a"}, nil, "- a"},
+		{[]string{"a", "b"}, []string{"a", "b"}, "  a|  b"},
+		{[]string{"a", "x", "b"}, []string{"a", "b"}, "  a|- x|  b"},
+		{[]string{"a", "a"}, []string{"a"}, "  a|- a"},
+	} {
+		if got := strings.Join(Diff(tt.before, tt.after), "|"); got != tt.want {
+			t.Errorf("Diff(%v, %v) = %q, want %q", tt.before, tt.after, got, tt.want)
+		}
 	}
 }
