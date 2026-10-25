@@ -14,7 +14,7 @@ AI agents get their tools from [MCP](https://modelcontextprotocol.io) servers: f
 
 portcullis runs in front of your MCP servers, inspects the JSON-RPC traffic in both directions, and (as it grows) enforces policy on it. It's a single Go binary. Its planned AI-based checks will use a **local** model through Ollama, so tool data never leaves your machine.
 
-> **Status:** early development. Today portcullis is a transparent stdio proxy for one server that logs every message, plus a local agent to drive it. Policy, scanners and the rest are on the [roadmap](#roadmap).
+> **Status:** early development. Today portcullis puts several sandboxed MCP servers behind one connection, logs every message and keeps a searchable SQLite audit log, and comes with a local agent to drive it. Policy, scanners and the rest are on the [roadmap](#roadmap).
 
 ## Quickstart
 
@@ -78,6 +78,65 @@ ok    container is gone after SIGTERM
 ```
 
 What's left is a Docker or kernel exploit, which is outside this project's threat model, and anything a model can be talked into doing with the tools it has inside the sandbox, which is what portcullis's policy and scanners are for. The upstream Dockerfiles use floating base-image tags (`node:24-alpine`, `python:3.12-slim-bookworm`), so a rebuild can pick up newer base images.
+
+## Several servers, one portcullis
+
+`portcullis serve` runs every server in a config file and offers them to the client as one MCP server:
+
+```yaml
+# portcullis.yaml (see portcullis.example.yaml)
+servers:
+  fs:
+    command: [sandbox/run.sh, filesystem]
+  git:
+    command: [sandbox/run.sh, git]
+  everything:
+    command: [sandbox/run.sh, everything]
+audit:
+  path: portcullis.db
+```
+
+```sh
+cp portcullis.example.yaml portcullis.yaml
+claude mcp add portcullis -- /home/user/portcullis/bin/portcullis serve --config /home/user/portcullis/portcullis.yaml
+```
+
+- **Namespaced.** Each server's tools and prompts get its name as a prefix, `fs__read_file` and `git__git_log`, so two servers can both have a `read_file` tool, and each call goes to the server it belongs to. A call without a prefix is rejected. Resources keep their URIs and are routed by them; if two servers offer the same URI, the first one keeps it.
+- **Live.** When a server's tool, prompt or resource list changes, portcullis fetches the new one and tells the client. If a server exits, its tools disappear, calls to it fail with a clear error, and the other servers keep working.
+- **Passed through:** tool calls with their `_meta` (so progress notifications reach the client), multi-round-trip input requests, cancellation, and both the classic `initialize` handshake and the newer `server/discover` one. Claude Code has connected both ways.
+- **Not passed through:** sampling, roots and logging, which protocol revision 2026-07-28 deprecates (SEP-2577), and resource templates and subscriptions, for now. portcullis tells servers it has no roots, so none of the client's directories are exposed to them.
+- **All or nothing at startup.** The servers start in parallel; if one fails, `serve` exits with that server's error rather than running with a partial set of tools. Each server's stderr is passed through with its name as a tag (`[fs] ...`).
+- Relative command paths are relative to the config file, so a client can start portcullis from any directory.
+
+`portcullis wrap` is still there for a single server. It works at the byte level and forwards anything, while `serve` speaks MCP itself (through the [official Go SDK](https://github.com/modelcontextprotocol/go-sdk)), which aggregation needs.
+
+## Audit log
+
+`serve` records every message in a SQLite database: the session, direction, server, method, tool, the params and the result (up to `audit.max_payload` bytes each, 64 KiB by default), any error, and how long it took. The file is created with mode `0600`, since it holds tool arguments and results. `portcullis audit` searches it.
+
+These are from a real Claude Code session that used one tool on each of the three sandboxed servers:
+
+```text
+$ portcullis audit sessions
+SESSION       STARTED           DURATION  CLIENT               SERVERS            MESSAGES  TOOL CALLS  FAILED
+AFAGSB5MI4FI  2026-10-24 22:50  10s       claude-code 2.1.310  everything,fs,git  13        3           0
+
+$ portcullis audit --method tools/call
+TIME          DIRECTION       SERVER      METHOD      TOOL                DURATION  STATUS
+22:51:03.851  client->server  fs          tools/call  fs__read_text_file  12.335ms  ok
+22:51:04.382  client->server  git         tools/call  git__git_log        12.981ms  ok
+22:51:04.617  client->server  everything  tools/call  everything__echo    11.49ms   ok
+```
+
+By default `audit` shows the most recent session. Some useful flags:
+
+```sh
+portcullis audit --session all --tool 'fs__*' --since 24h   # every fs call in the last day
+portcullis audit --failed --payloads                        # failed calls, with their params and results
+portcullis audit --json | jq .                              # JSON lines, params and results as JSON
+```
+
+A call the tool itself rejected, like the filesystem server refusing a path outside its workspace, is `failed`; a protocol error, like an unknown tool, is `error: ...`. When portcullis stops a server, that's `upstream/closed`; a server that dies on its own is a failed `upstream/disconnected`.
 
 ## A fully local agent: portcullis-agent
 
@@ -145,7 +204,9 @@ flowchart LR
     S -. stderr .-> L[logs]
 ```
 
-- **Raw passthrough.** portcullis parses each message to inspect it, but forwards the original bytes rather than re-encoding them. Methods it doesn't know pass through unchanged. That's how it already works with newer protocol revisions: the Claude Code session above opens with `server/discover` instead of the classic `initialize` handshake, and needed no special handling.
+For `wrap`, the single-server mode:
+
+- **Raw passthrough.** portcullis parses each message to inspect it, but forwards the original bytes rather than re-encoding them. Methods it doesn't know pass through unchanged. That's how it worked with Claude Code's newer protocol revision (`server/discover` instead of the classic `initialize` handshake) without any special handling.
 - **Both directions.** Servers send requests to clients too (sampling, roots, elicitation), so the response matching works both ways.
 - **Bounded memory.** The line reader enforces the size limit while reading, so a misbehaving peer can't make portcullis buffer an endless line.
 - **Clean shutdown**, as the MCP spec describes for stdio: when the client hangs up, portcullis closes the server's stdin, then sends SIGTERM, then SIGKILL, waiting `--shutdown-grace` between steps. A SIGTERM to portcullis is passed on to the server. portcullis exits with the server's exit code.
@@ -155,7 +216,7 @@ flowchart LR
 
 1. ~~stdio passthrough proxy for one server, with logging~~
 2. ~~A bundled Go agent that uses Ollama tool calling, working through the proxy~~
-3. Several upstream servers behind one proxy, with namespaced tools; SQLite audit log
+3. ~~Several upstream servers behind one proxy, with namespaced tools; SQLite audit log~~
 4. Policy engine: allow/deny rules with CEL conditions on arguments, rate limits, dry-run mode
 5. Tool-definition pinning (rug-pull detection), tool-poisoning scanner, secret redaction, prompt-injection detection with a local guard model
 6. Human approval flow and web dashboard, a deliberately malicious demo server, metrics, policy replay
@@ -169,7 +230,7 @@ make fuzz   # short fuzzing pass over the JSON-RPC parser and line reader
 make sandbox && sandbox/check.sh filesystem   # build and verify the sandboxed servers
 ```
 
-No test needs Ollama or the network. The end-to-end tests build the binaries and run them against fakes: portcullis in front of a fake server (the test binary re-executed), covering relaying, exit codes, shutdown escalation and log files; and the full agent → portcullis → MCP server chain with a fake Ollama, covering one-shot and chat mode. The Ollama client's tests replay streams recorded from a real server.
+No test needs Ollama or the network. The end-to-end tests build the binaries and run them against fakes (the test binary re-executed as an MCP server): `wrap` covering relaying, exit codes, shutdown escalation and log files; `serve` with two servers, then `portcullis audit` reading back what it recorded; and the full agent → portcullis → MCP server chain with a fake Ollama, in one-shot and chat mode. The gateway's tests run real SDK servers over in-memory transports, including servers that change their tool lists or exit mid-session. The Ollama client's tests replay streams recorded from a real server.
 
 ## License
 

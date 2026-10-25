@@ -20,9 +20,16 @@ import (
 // instead of running tests. Its value picks the server's behavior.
 const fakeServerEnv = "PORTCULLIS_FAKE_SERVER"
 
+// When this env var is set, the test binary runs as an MCP server built with
+// the SDK, named by its last argument.
+const fakeMCPEnv = "PORTCULLIS_FAKE_MCP"
+
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(fakeServerEnv); mode != "" {
 		os.Exit(fakeServer(mode))
+	}
+	if os.Getenv(fakeMCPEnv) != "" {
+		os.Exit(fakeMCPServer(os.Args[len(os.Args)-1]))
 	}
 	os.Exit(m.Run())
 }
