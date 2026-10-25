@@ -22,3 +22,12 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0
+
+  # Builds the sandboxed MCP servers and checks from inside each container
+  # that it can't reach the host.
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make sandbox
+      - run: for s in filesystem git everything; do sandbox/check.sh "$s" || exit 1; done

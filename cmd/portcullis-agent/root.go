@@ -43,8 +43,7 @@ the tool calls the model makes.
 
 To see and control what the model does, start the server through portcullis:
 put "portcullis wrap --" in front of the server's command.`,
-		Example: `  portcullis-agent -- portcullis wrap --log-file portcullis.log -- \
-    npx -y @modelcontextprotocol/server-filesystem /home/user/project
+		Example: `  portcullis-agent -- portcullis wrap --log-file portcullis.log -- sandbox/run.sh filesystem
 
   portcullis-agent -m llama3.2:3b -p "Which files are in the project?" -- portcullis wrap -- ./my-server`,
 		Version:       version,
@@ -71,7 +70,7 @@ put "portcullis wrap --" in front of the server's command.`,
 	f.IntVar(&opts.numCtx, "num-ctx", 16384, "context window in tokens; tool definitions take space (0 = Ollama's default)")
 	f.Float64Var(&opts.temperature, "temperature", 0, "sampling temperature (default: the model's own)")
 	f.StringVar(&opts.serverStderr, "server-stderr", "", "write the MCP server's stderr to this file (default: discard, but show it if startup fails)")
-	f.DurationVar(&opts.connectWait, "connect-timeout", 2*time.Minute, "how long the MCP server gets to start (npx may download it first)")
+	f.DurationVar(&opts.connectWait, "connect-timeout", 2*time.Minute, "how long the MCP server gets to start")
 	return cmd
 }
 

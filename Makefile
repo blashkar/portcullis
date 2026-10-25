@@ -22,3 +22,20 @@ fmt:
 
 clean:
 	rm -rf bin
+
+# Sandboxed MCP servers. Each is built from the official source at a pinned
+# commit, fetched by Docker straight from GitHub, then given a made-up
+# workspace by a Dockerfile built with no context. No host files go in.
+# modelcontextprotocol/servers v2.1.0
+UPSTREAM_REF := ef9808f71090d0db3eda99e2af2ba78f1086f4fb
+UPSTREAM := https://github.com/modelcontextprotocol/servers.git\#$(UPSTREAM_REF)
+SANDBOX_SERVERS := filesystem git everything
+
+.PHONY: sandbox
+sandbox:
+	docker build -t portcullis-upstream/filesystem -f src/filesystem/Dockerfile "$(UPSTREAM)"
+	docker build -t portcullis-upstream/everything -f src/everything/Dockerfile "$(UPSTREAM)"
+	docker build -t portcullis-upstream/git "$(UPSTREAM):src/git"
+	for s in $(SANDBOX_SERVERS); do \
+		docker build -t portcullis-sandbox/$$s --build-arg BASE=portcullis-upstream/$$s - < sandbox/$$s.Dockerfile || exit 1; \
+	done
