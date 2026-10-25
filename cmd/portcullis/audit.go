@@ -23,6 +23,10 @@ type auditOptions struct {
 	upstream   string
 	method     string
 	failed     bool
+	blocked    bool
+	decision   string
+	rule       string
+	logOnly    bool
 	since      time.Duration
 	limit      int
 	asJSON     bool
@@ -39,6 +43,8 @@ it shows the most recent session; --session all searches every session.`,
 		Example: `  portcullis audit                      # the last session
   portcullis audit --tool 'fs__*' --session all --since 24h
   portcullis audit --failed --payloads
+  portcullis audit --blocked --session all
+  portcullis audit --log-only        # what log_only rules would have changed
   portcullis audit sessions`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -57,6 +63,10 @@ it shows the most recent session; --session all searches every session.`,
 	f.StringVarP(&opts.upstream, "server", "u", "", "only messages routed to this server")
 	f.StringVarP(&opts.method, "method", "m", "", "only this method, such as tools/call")
 	f.BoolVar(&opts.failed, "failed", false, "only failed calls")
+	f.BoolVar(&opts.blocked, "blocked", false, "only calls the policy blocked")
+	f.StringVar(&opts.decision, "decision", "", "only calls with this policy decision: allow, deny, require_approval or rate_limit")
+	f.StringVar(&opts.rule, "rule", "", "only calls this policy rule decided, or would have")
+	f.BoolVar(&opts.logOnly, "log-only", false, "only calls a log_only rule would have decided differently")
 	f.DurationVar(&opts.since, "since", 0, "only messages from this long ago, such as 1h")
 	f.BoolVarP(&opts.payloads, "payloads", "p", false, "show each message's params and result")
 
@@ -97,7 +107,10 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 	defer store.Close()
 	ctx := cmd.Context()
 
-	f := audit.Filter{Tool: opts.tool, Upstream: opts.upstream, Method: opts.method, OnlyFails: opts.failed, Limit: opts.limit}
+	f := audit.Filter{
+		Tool: opts.tool, Upstream: opts.upstream, Method: opts.method, OnlyFails: opts.failed,
+		Blocked: opts.blocked, Decision: opts.decision, Rule: opts.rule, LogOnly: opts.logOnly, Limit: opts.limit,
+	}
 	switch opts.session {
 	case "all":
 	case "last":
@@ -127,12 +140,15 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 		fmt.Fprintf(out, "session %s\n\n", f.SessionID)
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TIME\tDIRECTION\tSERVER\tMETHOD\tTOOL\tDURATION\tSTATUS")
+	fmt.Fprintln(tw, "TIME\tDIRECTION\tSERVER\tMETHOD\tTOOL\tDURATION\tPOLICY\tSTATUS")
 	for _, e := range events {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			e.Time.Local().Format("15:04:05.000"), e.Direction, dash(e.Upstream), e.Method, dash(e.Tool),
-			formatDuration(e.Duration), status(e))
+			formatDuration(e.Duration), policyText(e), status(e))
 		if opts.payloads {
+			if e.Reason != "" {
+				fmt.Fprintf(tw, "\t  reason: %s\n", e.Reason)
+			}
 			if e.Params != "" {
 				fmt.Fprintf(tw, "\t  params: %s\n", e.Params)
 			}
@@ -162,14 +178,14 @@ func runAuditSessions(cmd *cobra.Command, opts auditOptions) error {
 		return audit.ErrNoSessions
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION\tSTARTED\tDURATION\tCLIENT\tSERVERS\tMESSAGES\tTOOL CALLS\tFAILED")
+	fmt.Fprintln(tw, "SESSION\tSTARTED\tDURATION\tCLIENT\tSERVERS\tMESSAGES\tTOOL CALLS\tBLOCKED\tFAILED")
 	for _, s := range sessions {
 		dur := "open"
 		if !s.Ended.IsZero() {
 			dur = s.Ended.Sub(s.Started).Round(time.Second).String()
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\n",
-			s.ID, s.Started.Local().Format("2006-01-02 15:04"), dur, dash(s.Client), s.Upstreams, s.Events, s.ToolCallCount, s.FailedEvents)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\n",
+			s.ID, s.Started.Local().Format("2006-01-02 15:04"), dur, dash(s.Client), s.Upstreams, s.Events, s.ToolCallCount, s.BlockedCalls, s.FailedEvents)
 	}
 	return tw.Flush()
 }
@@ -210,14 +226,22 @@ func eventJSON(e audit.Event) any {
 		Error     string    `json:"error,omitempty"`
 		Failed    bool      `json:"failed"`
 		Duration  float64   `json:"duration_ms"`
+		Decision  string    `json:"decision,omitempty"`
+		Rule      string    `json:"rule,omitempty"`
+		Reason    string    `json:"reason,omitempty"`
+		Would     string    `json:"log_only_decision,omitempty"`
+		WouldRule string    `json:"log_only_rule,omitempty"`
 	}{
 		e.ID, e.SessionID, e.Time, e.Direction, e.Upstream, e.Method, e.Tool, raw(e.Params), raw(e.Result),
 		e.Error, e.IsError, float64(e.Duration.Microseconds()) / 1000,
+		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule,
 	}
 }
 
 func status(e audit.Event) string {
 	switch {
+	case blocked(e):
+		return "blocked"
 	case e.Error != "":
 		return "error: " + firstLine(e.Error)
 	case e.IsError:
@@ -225,6 +249,23 @@ func status(e audit.Event) string {
 	default:
 		return "ok"
 	}
+}
+
+func blocked(e audit.Event) bool {
+	return e.Decision != "" && e.Decision != "allow"
+}
+
+// policyText shows a decision and the rule that made it, such as
+// "deny fs-workspace-only", followed by what log_only rules would have done.
+func policyText(e audit.Event) string {
+	if e.Decision == "" {
+		return "-"
+	}
+	out := strings.TrimSpace(e.Decision + " " + e.Rule)
+	if e.WouldDecision != "" {
+		out += " (log_only: " + strings.TrimSpace(e.WouldDecision+" "+e.WouldRule) + ")"
+	}
+	return out
 }
 
 func formatDuration(d time.Duration) string {

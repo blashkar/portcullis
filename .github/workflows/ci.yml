@@ -22,6 +22,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0
+      - run: make vuln
 
   # Builds the sandboxed MCP servers and checks from inside each container
   # that it can't reach the host.

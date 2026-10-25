@@ -5,6 +5,8 @@
 // both have a read_file tool. Resources keep their URIs and are routed by
 // them. Calls are forwarded to the upstream that owns the name, and every
 // message is logged and, if a Recorder is set, written to the audit log.
+// Before a tool call is forwarded, the policy, if there is one, decides
+// whether it may go ahead.
 //
 // When an upstream's tool, prompt or resource list changes, the gateway
 // picks up the new list and the client is told; when an upstream exits,
@@ -12,22 +14,31 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
+	"github.com/blashkar/portcullis/internal/policy"
 )
+
+// CodePolicyBlocked is the JSON-RPC error code for a tool call the policy
+// stopped. The error's data says which rule and why.
+const CodePolicyBlocked = -32030
 
 // Recorder stores audit events. *audit.Store implements it.
 type Recorder interface {
@@ -39,7 +50,8 @@ type Options struct {
 	Version   string
 	SessionID string
 	Logger    *slog.Logger
-	Recorder  Recorder // nil disables the audit log
+	Recorder  Recorder       // nil disables the audit log
+	Policy    *policy.Policy // nil allows every call
 
 	// OnClientInfo is called once the client has said who it is.
 	OnClientInfo func(name, version string)
@@ -261,6 +273,17 @@ func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
 
 func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, forward, err := decodeArgs(req.Params.Arguments)
+		if err != nil {
+			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: err.Error()}
+		}
+		if g.opts.Policy != nil {
+			d := g.opts.Policy.Check(policy.Call{Tool: req.Params.Name, Server: upstream, Args: args})
+			g.noteDecision(ctx, req.Params.Name, d)
+			if d.Blocked() {
+				return nil, blockedError(req.Params.Name, d)
+			}
+		}
 		s, err := g.session(upstream)
 		if err != nil {
 			return nil, err
@@ -268,10 +291,103 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 		return s.CallTool(ctx, &mcp.CallToolParams{
 			Meta:           req.Params.Meta,
 			Name:           tool,
-			Arguments:      req.Params.Arguments,
+			Arguments:      forward,
 			InputResponses: req.Params.InputResponses,
 			RequestState:   req.Params.RequestState,
 		})
+	}
+}
+
+// decodeArgs decodes a tool call's arguments for the policy to check, and
+// encodes them again for the upstream. Forwarding the re-encoded arguments
+// means the server gets exactly what the policy saw: if the client sent a
+// key twice, say, the server can't read the copy the policy didn't.
+func decodeArgs(raw json.RawMessage) (map[string]any, json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return map[string]any{}, nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // keep large integers exact
+	var args map[string]any
+	if err := dec.Decode(&args); err != nil || args == nil {
+		return nil, nil, errors.New("tool arguments must be a JSON object")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, nil, errors.New("tool arguments must be a single JSON object")
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(args); err != nil {
+		return nil, nil, err
+	}
+	forward := json.RawMessage(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+	return celValue(args).(map[string]any), forward, nil
+}
+
+// celValue turns the json.Numbers in a decoded value into int64 or float64,
+// which CEL understands.
+func celValue(v any) any {
+	switch v := v.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i
+		}
+		f, _ := v.Float64()
+		return f
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, x := range v {
+			out[k] = celValue(x)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, x := range v {
+			out[i] = celValue(x)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// blockedError is the error a blocked call gets.
+func blockedError(tool string, d policy.Decision) error {
+	rule := "the default policy"
+	if d.Rule != "" {
+		rule = "rule " + strconv.Quote(d.Rule)
+	}
+	var msg string
+	switch {
+	case d.RateLimited:
+		msg = fmt.Sprintf("portcullis: %s is rate limited (%s): %s", tool, rule, d.Reason)
+	case d.Action == policy.RequireApproval:
+		msg = fmt.Sprintf("portcullis: %s needs a person's approval (%s), and no approver is configured", tool, rule)
+	default:
+		msg = fmt.Sprintf("portcullis: the policy does not allow %s (%s)", tool, rule)
+		if d.Reason != "" && d.Reason != "no rule matched" {
+			msg += ": " + d.Reason
+		}
+	}
+	data, _ := json.Marshal(map[string]string{"decision": d.Outcome(), "rule": d.Rule, "reason": d.Reason})
+	return &jsonrpc.Error{Code: CodePolicyBlocked, Message: msg, Data: data}
+}
+
+// decisionKey marks the context value through which a tool handler hands
+// the policy's decision to the observe middleware, which records it.
+type decisionKey struct{}
+
+func (g *Gateway) noteDecision(ctx context.Context, tool string, d policy.Decision) {
+	if p, ok := ctx.Value(decisionKey{}).(*policy.Decision); ok {
+		*p = d
+	}
+	attrs := []any{"tool", tool, "decision", d.Outcome(), "rule", d.Rule, "reason", d.Reason}
+	if d.Blocked() {
+		g.log.Warn("call blocked by policy", attrs...)
+	}
+	if w := d.Would; w != nil {
+		g.log.Warn("log_only policy would decide differently", "tool", tool, "decision", d.Outcome(), "would", w.Outcome(), "rule", w.Rule, "reason", w.Reason)
 	}
 }
 
@@ -447,10 +563,20 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 			if dir == audit.ClientToServer {
 				g.noteClient(req)
 			}
+			var d policy.Decision
+			if dir == audit.ClientToServer && method == "tools/call" {
+				ctx = context.WithValue(ctx, decisionKey{}, &d)
+			}
 			start := time.Now()
 			res, err := next(ctx, method, req)
 			e := audit.Event{Time: start, Direction: dir, Method: method, Duration: time.Since(start), Error: errString(err), IsError: err != nil}
 			g.describe(&e, req.GetParams(), res)
+			if d.Action != "" {
+				e.Decision, e.Rule, e.Reason = d.Outcome(), d.Rule, d.Reason
+				if d.Would != nil {
+					e.WouldDecision, e.WouldRule = d.Would.Outcome(), d.Would.Rule
+				}
+			}
 			g.logEvent(e)
 			g.record(context.WithoutCancel(ctx), e)
 			return res, err
@@ -498,6 +624,9 @@ func (g *Gateway) logEvent(e audit.Event) {
 	}
 	if e.Upstream != "" {
 		attrs = append(attrs, "upstream", e.Upstream)
+	}
+	if e.Decision != "" {
+		attrs = append(attrs, "decision", e.Decision)
 	}
 	if e.IsError {
 		attrs = append(attrs, "failed", true)

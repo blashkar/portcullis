@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/blashkar/portcullis/internal/audit"
+	"github.com/blashkar/portcullis/internal/policy"
 )
 
 // fakeRecorder keeps audit events in memory.
@@ -74,11 +75,16 @@ type harness struct {
 // start connects the upstreams to a new gateway and a client to the gateway.
 func start(t *testing.T, upstreams map[string]*mcp.Server) *harness {
 	t.Helper()
+	return startWithPolicy(t, upstreams, nil)
+}
+
+func startWithPolicy(t *testing.T, upstreams map[string]*mcp.Server, pol *policy.Policy) *harness {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h := &harness{t: t, ctx: ctx, rec: &fakeRecorder{}, upstream: map[string]*mcp.ServerSession{}}
 	h.gw = New(Options{
-		Version: "test", SessionID: "sess-1", Recorder: h.rec,
+		Version: "test", SessionID: "sess-1", Recorder: h.rec, Policy: pol,
 		OnClientInfo: func(name, version string) {
 			h.clientMu.Lock()
 			h.info = name + " " + version
