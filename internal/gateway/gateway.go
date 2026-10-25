@@ -8,6 +8,10 @@
 // Before a tool call is forwarded, the policy, if there is one, decides
 // whether it may go ahead.
 //
+// Tools are checked before they are offered: a tool whose definition
+// changed since it was pinned, or that looks poisoned, is held back. Secrets
+// in tool results, resources and prompts are redacted on the way back.
+//
 // When an upstream's tool, prompt or resource list changes, the gateway
 // picks up the new list and the client is told; when an upstream exits,
 // its tools disappear and the others keep working.
@@ -33,7 +37,9 @@ import (
 
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
+	"github.com/blashkar/portcullis/internal/pin"
 	"github.com/blashkar/portcullis/internal/policy"
+	"github.com/blashkar/portcullis/internal/redact"
 )
 
 // CodePolicyBlocked is the JSON-RPC error code for a tool call the policy
@@ -53,6 +59,11 @@ type Options struct {
 	Recorder  Recorder       // nil disables the audit log
 	Policy    *policy.Policy // nil allows every call
 
+	Pins     *pin.Store    // nil turns tool pinning off
+	PinPoll  time.Duration // how often to look for approvals; 0 means DefaultPinPoll
+	Scan     ScanOptions
+	Redactor *redact.Redactor // nil turns redaction off
+
 	// OnClientInfo is called once the client has said who it is.
 	OnClientInfo func(name, version string)
 }
@@ -70,6 +81,8 @@ type Gateway struct {
 	client    *mcp.ServerSession
 	gotClient bool
 	closing   bool // Close was called, so upstreams exiting is expected
+	// reported holds the tool reports already made, so each is made once.
+	reported map[string]bool
 }
 
 type upstream struct {
@@ -79,7 +92,9 @@ type upstream struct {
 
 	// syncMu serializes refreshes of this upstream's lists.
 	syncMu    sync.Mutex
-	tools     map[string]bool // client-facing names
+	tools     map[string]bool   // client-facing names of the tools offered
+	held      map[string]string // tools held back, with the reason
+	names     []string          // every tool's name as the server gives it
 	prompts   map[string]bool
 	resources map[string]bool // URIs
 }
@@ -94,6 +109,7 @@ func New(opts Options) *Gateway {
 		log:       opts.Logger,
 		upstreams: map[string]*upstream{},
 		resources: map[string]string{},
+		reported:  map[string]bool{},
 	}
 	g.server = mcp.NewServer(&mcp.Implementation{Name: "portcullis", Version: opts.Version}, &mcp.ServerOptions{
 		Capabilities: &mcp.ServerCapabilities{
@@ -102,7 +118,7 @@ func New(opts Options) *Gateway {
 			Resources: &mcp.ResourceCapabilities{ListChanged: true},
 		},
 	})
-	g.server.AddReceivingMiddleware(g.observe(audit.ClientToServer))
+	g.server.AddReceivingMiddleware(g.observe(audit.ClientToServer), g.guard)
 	g.server.AddSendingMiddleware(g.observe(audit.ServerToClient))
 	return g
 }
@@ -165,6 +181,9 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 
 // Serve serves one client over t until it disconnects or ctx is cancelled.
 func (g *Gateway) Serve(ctx context.Context, t mcp.Transport) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go g.watchPins(ctx)
 	return g.server.Run(ctx, t)
 }
 
@@ -252,21 +271,39 @@ func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
 		tools = append(tools, t)
 	}
 
-	seen := map[string]bool{}
+	offered := map[string]*mcp.Tool{}
+	var names []string
 	for _, t := range tools {
-		name := prefixed(u.name, t.Name)
-		ft := *t
-		ft.Name = name
-		if !validObjectSchema(ft.InputSchema) {
+		names = append(names, t.Name)
+		if !validObjectSchema(t.InputSchema) {
 			g.log.Warn("skipping tool with an invalid input schema", "upstream", u.name, "tool", t.Name)
 			continue
 		}
-		g.server.AddTool(&ft, g.toolHandler(u.name, t.Name))
+		ft := *t
+		ft.Name = prefixed(u.name, t.Name)
+		offered[ft.Name] = &ft
+	}
+	g.mu.Lock()
+	u.names = names
+	g.mu.Unlock()
+
+	checks, err := g.checkTools(u.name, offered, g.otherToolNames(u.name))
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	held := map[string]string{}
+	for name, ft := range offered {
+		if r := checks[name].held; r != "" {
+			held[name] = r
+			continue
+		}
+		g.server.AddTool(ft, g.toolHandler(u.name, strings.TrimPrefix(name, u.name+config.Separator)))
 		seen[name] = true
 	}
 	g.server.RemoveTools(stale(u.tools, seen)...)
 	g.mu.Lock()
-	u.tools = seen
+	u.tools, u.held = seen, held
 	g.mu.Unlock()
 	return nil
 }
@@ -288,13 +325,15 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 		if err != nil {
 			return nil, err
 		}
-		return s.CallTool(ctx, &mcp.CallToolParams{
+		res, err := s.CallTool(ctx, &mcp.CallToolParams{
 			Meta:           req.Params.Meta,
 			Name:           tool,
 			Arguments:      forward,
 			InputResponses: req.Params.InputResponses,
 			RequestState:   req.Params.RequestState,
 		})
+		g.redactToolResult(ctx, res)
+		return res, err
 	}
 }
 
@@ -374,13 +413,9 @@ func blockedError(tool string, d policy.Decision) error {
 	return &jsonrpc.Error{Code: CodePolicyBlocked, Message: msg, Data: data}
 }
 
-// decisionKey marks the context value through which a tool handler hands
-// the policy's decision to the observe middleware, which records it.
-type decisionKey struct{}
-
 func (g *Gateway) noteDecision(ctx context.Context, tool string, d policy.Decision) {
-	if p, ok := ctx.Value(decisionKey{}).(*policy.Decision); ok {
-		*p = d
+	if n := noteFrom(ctx); n != nil {
+		n.decision = &d
 	}
 	attrs := []any{"tool", tool, "decision", d.Outcome(), "rule", d.Rule, "reason", d.Reason}
 	if d.Blocked() {
@@ -420,7 +455,9 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 			if err != nil {
 				return nil, err
 			}
-			return s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
+			res, err := s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
+			g.redactPrompt(ctx, res)
+			return res, err
 		})
 		seen[name] = true
 	}
@@ -485,7 +522,9 @@ func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
 		if err != nil {
 			return nil, err
 		}
-		return s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
+		res, err := s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
+		g.redactResource(ctx, res)
+		return res, err
 	}
 }
 
@@ -511,6 +550,7 @@ func (g *Gateway) upstreamExited(u *upstream, err error) {
 		delete(g.resources, uri)
 	}
 	u.tools, u.prompts, u.resources = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	u.held, u.names = nil, nil
 
 	closing := g.closing
 	g.mu.Unlock()
@@ -563,19 +603,25 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 			if dir == audit.ClientToServer {
 				g.noteClient(req)
 			}
-			var d policy.Decision
-			if dir == audit.ClientToServer && method == "tools/call" {
-				ctx = context.WithValue(ctx, decisionKey{}, &d)
+			var note callNote
+			if dir == audit.ClientToServer {
+				ctx = context.WithValue(ctx, noteKey{}, &note)
 			}
 			start := time.Now()
 			res, err := next(ctx, method, req)
 			e := audit.Event{Time: start, Direction: dir, Method: method, Duration: time.Since(start), Error: errString(err), IsError: err != nil}
 			g.describe(&e, req.GetParams(), res)
-			if d.Action != "" {
+			if d := note.decision; d != nil {
 				e.Decision, e.Rule, e.Reason = d.Outcome(), d.Rule, d.Reason
 				if d.Would != nil {
 					e.WouldDecision, e.WouldRule = d.Would.Outcome(), d.Would.Rule
 				}
+			}
+			if note.held != "" {
+				e.Decision, e.Reason = audit.DecisionHeld, note.held
+			}
+			if len(note.redacted) > 0 {
+				e.Findings = "redacted: " + note.redacted.String()
 			}
 			g.logEvent(e)
 			g.record(context.WithoutCancel(ctx), e)

@@ -33,6 +33,8 @@ import (
 
 	"cel.dev/cel-go/cel"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/blashkar/portcullis/internal/glob"
 )
 
 // Action is what a rule does with a call it matches.
@@ -136,7 +138,7 @@ type Policy struct {
 
 type rule struct {
 	name    string
-	tools   []*regexp.Regexp
+	tools   glob.Patterns
 	when    cel.Program // nil: always
 	action  Action
 	limit   *limiter
@@ -195,12 +197,11 @@ func compileRule(env *cel.Env, rs RuleSpec, i int) (*rule, error) {
 	if len(patterns) == 0 {
 		patterns = Patterns{"*"}
 	}
-	for _, pat := range patterns {
-		if pat == "" {
-			return fail("empty tool pattern")
-		}
-		r.tools = append(r.tools, globRegexp(pat))
+	tools, err := glob.Compile(patterns)
+	if err != nil {
+		return fail("%v", err)
 	}
+	r.tools = tools
 
 	switch {
 	case rs.RateLimit != "" && rs.Action != "":
@@ -232,17 +233,6 @@ func compileRule(env *cel.Env, rs RuleSpec, i int) (*rule, error) {
 		r.when = prg
 	}
 	return r, nil
-}
-
-// globRegexp turns a tool pattern into a regexp in which "*" matches any
-// run of characters, including "/" and "__", so no tool name can slip
-// past a "*".
-func globRegexp(pat string) *regexp.Regexp {
-	parts := strings.Split(pat, "*")
-	for i, p := range parts {
-		parts[i] = regexp.QuoteMeta(p)
-	}
-	return regexp.MustCompile(`(?s)\A` + strings.Join(parts, ".*") + `\z`)
 }
 
 // Check decides whether a call may go ahead. It is safe for concurrent use.
@@ -319,12 +309,7 @@ func (r *rule) decide(c Call) (Decision, bool) {
 }
 
 func (r *rule) matchesTool(tool string) bool {
-	for _, re := range r.tools {
-		if re.MatchString(tool) {
-			return true
-		}
-	}
-	return false
+	return r.tools.Match(tool)
 }
 
 // Unused returns the names of the rules whose tool patterns match none of

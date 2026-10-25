@@ -1,6 +1,6 @@
 // Package config loads the portcullis serve configuration: which upstream
-// MCP servers to run, where to keep the audit log, and the policy that
-// decides which tool calls may go ahead.
+// MCP servers to run, where to keep the audit log, the policy that decides
+// which tool calls may go ahead, and the checks on what servers send back.
 //
 //	servers:
 //	  fs:
@@ -27,7 +27,9 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/blashkar/portcullis/internal/glob"
 	"github.com/blashkar/portcullis/internal/policy"
+	"github.com/blashkar/portcullis/internal/redact"
 )
 
 // Separator joins a server's name and one of its tool or prompt names:
@@ -37,6 +39,9 @@ const Separator = "__"
 
 // DefaultAuditPath is the audit database, relative to the config file.
 const DefaultAuditPath = "portcullis.db"
+
+// DefaultPinsPath is the pin file, relative to the config file.
+const DefaultPinsPath = "portcullis.pins.json"
 
 // DefaultMaxPayload caps how much of each message's params and result is
 // stored in the audit log.
@@ -48,6 +53,9 @@ type Config struct {
 	Audit   Audit             `yaml:"audit"`
 	// Policy decides which tool calls may go ahead; see package policy.
 	Policy policy.Spec `yaml:"policy"`
+	Pins   Pins        `yaml:"pins"`
+	Scan   Scan        `yaml:"scan"`
+	Redact Redact      `yaml:"redact"`
 
 	// Dir is the directory of the config file. Relative paths in the config
 	// are resolved against it, so a client can start portcullis from anywhere.
@@ -70,6 +78,40 @@ type Audit struct {
 	// MaxPayload caps the stored params and result of each message, in
 	// bytes; 0 means DefaultMaxPayload.
 	MaxPayload int `yaml:"max_payload"`
+}
+
+// Pins configures tool pinning: holding back a tool whose definition
+// changed since it was approved.
+type Pins struct {
+	// Path is the pin file; "" means DefaultPinsPath.
+	Path     string `yaml:"path"`
+	Disabled bool   `yaml:"disabled"`
+	// NewTools is what happens to a tool seen for the first time: "pin"
+	// (the default) trusts it and pins it; "hold" holds it until approved.
+	NewTools string `yaml:"new_tools"`
+}
+
+// Scan configures the tool-poisoning scanner.
+type Scan struct {
+	// Tools is what happens to a tool whose definition has a high-severity
+	// finding: "hide" (the default), "log", or "off" to skip scanning.
+	Tools string `yaml:"tools"`
+	// Ignore lists tool patterns not to scan, for tools you have reviewed.
+	Ignore []string `yaml:"ignore"`
+}
+
+// Redact configures secret redaction in what servers send back.
+type Redact struct {
+	Disabled bool `yaml:"disabled"`
+	// Patterns are extra secrets to redact, after the built-in ones.
+	Patterns []RedactPattern `yaml:"patterns"`
+}
+
+// RedactPattern is a custom secret format. A group named "secret" limits
+// the redaction to that part of the match.
+type RedactPattern struct {
+	Name  string `yaml:"name"`
+	Regex string `yaml:"regex"`
 }
 
 var serverName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -127,7 +169,65 @@ func (c *Config) validate() error {
 	if _, err := c.CompilePolicy(); err != nil {
 		errs = append(errs, err)
 	}
+	switch c.Pins.NewTools {
+	case "", "pin", "hold":
+	default:
+		errs = append(errs, fmt.Errorf("pins.new_tools must be pin or hold, not %q", c.Pins.NewTools))
+	}
+	switch c.Scan.Tools {
+	case "", "hide", "log", "off":
+	default:
+		errs = append(errs, fmt.Errorf("scan.tools must be hide, log or off, not %q", c.Scan.Tools))
+	}
+	if _, err := glob.Compile(c.Scan.Ignore); err != nil {
+		errs = append(errs, fmt.Errorf("scan.ignore: %w", err))
+	}
+	if _, err := c.Redactor(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// PinsPath returns the pin file's path, or "" if pinning is off.
+func (c *Config) PinsPath() string {
+	if c.Pins.Disabled {
+		return ""
+	}
+	return c.resolve(c.Pins.Path, DefaultPinsPath)
+}
+
+// HoldNewTools reports whether tools seen for the first time wait for
+// approval.
+func (c *Config) HoldNewTools() bool {
+	return c.Pins.NewTools == "hold"
+}
+
+// ScanIgnore returns the compiled scan.ignore patterns.
+func (c *Config) ScanIgnore() glob.Patterns {
+	p, _ := glob.Compile(c.Scan.Ignore) // checked by validate
+	return p
+}
+
+// Redactor returns the redactor, or nil if redaction is off.
+func (c *Config) Redactor() (*redact.Redactor, error) {
+	if c.Redact.Disabled {
+		return nil, nil
+	}
+	var extra []redact.Rule
+	for i, p := range c.Redact.Patterns {
+		if p.Name == "" {
+			return nil, fmt.Errorf("redact.patterns[%d]: no name", i)
+		}
+		re, err := regexp.Compile(p.Regex)
+		if err != nil {
+			return nil, fmt.Errorf("redact.patterns[%d] (%s): %w", i, p.Name, err)
+		}
+		if re.MatchString("") {
+			return nil, fmt.Errorf("redact.patterns[%d] (%s): the pattern matches empty text", i, p.Name)
+		}
+		extra = append(extra, redact.Rule{Name: p.Name, Pattern: re})
+	}
+	return redact.New(extra...), nil
 }
 
 // CompilePolicy compiles the policy section. It returns nil, which allows
@@ -163,9 +263,13 @@ func (c *Config) AuditPath() string {
 	if c.Audit.Disabled {
 		return ""
 	}
-	p := c.Audit.Path
+	return c.resolve(c.Audit.Path, DefaultAuditPath)
+}
+
+// resolve returns p, or def if p is empty, relative to the config's directory.
+func (c *Config) resolve(p, def string) string {
 	if p == "" {
-		p = DefaultAuditPath
+		p = def
 	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(c.Dir, p)
