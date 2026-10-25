@@ -19,10 +19,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +61,8 @@ type Config struct {
 	Scan   Scan        `yaml:"scan"`
 	Redact Redact      `yaml:"redact"`
 	Inject Inject      `yaml:"inject"`
+	// Dashboard is the local web page where calls are approved.
+	Dashboard Dashboard `yaml:"dashboard"`
 
 	// Dir is the directory of the config file. Relative paths in the config
 	// are resolved against it, so a client can start portcullis from anywhere.
@@ -131,6 +136,27 @@ type Guard struct {
 	Check   string        `yaml:"check"`
 	Timeout time.Duration `yaml:"timeout"`
 }
+
+// Dashboard configures the local web dashboard: calls waiting for a
+// person's approval, tools held back, and live activity.
+type Dashboard struct {
+	// Enabled turns it on. Without it, calls a rule says need approval are
+	// blocked.
+	Enabled bool `yaml:"enabled"`
+	// Addr is where it listens; "" means DefaultDashboardAddr. Only loopback
+	// addresses are allowed: it can approve tool calls.
+	Addr string `yaml:"addr"`
+	// ApprovalTimeout is how long a call waits for a decision before it is
+	// denied; 0 means two minutes.
+	ApprovalTimeout time.Duration `yaml:"approval_timeout"`
+}
+
+// DefaultDashboardAddr is where the dashboard listens by default.
+const DefaultDashboardAddr = "127.0.0.1:7878"
+
+// DashboardURLFile holds the running dashboard's URL, token included,
+// relative to the config file. "portcullis dashboard" reads it.
+const DashboardURLFile = "portcullis.dashboard"
 
 // RedactPattern is a custom secret format. A group named "secret" limits
 // the redaction to that part of the match.
@@ -223,7 +249,44 @@ func (c *Config) validate() error {
 	if c.Inject.Guard.Timeout < 0 {
 		errs = append(errs, errors.New("inject.guard.timeout can't be negative"))
 	}
+	if err := checkLoopback(c.DashboardAddr()); err != nil {
+		errs = append(errs, fmt.Errorf("dashboard.addr: %w", err))
+	}
+	if c.Dashboard.ApprovalTimeout < 0 {
+		errs = append(errs, errors.New("dashboard.approval_timeout can't be negative"))
+	}
 	return errors.Join(errs...)
+}
+
+// checkLoopback checks that addr is a host and port on this machine only.
+func checkLoopback(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("bad port %q", port)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("%s isn't a loopback address such as 127.0.0.1; the dashboard can approve tool calls, so it must not be reachable from other machines", host)
+}
+
+// DashboardAddr returns where the dashboard listens.
+func (c *Config) DashboardAddr() string {
+	if c.Dashboard.Addr == "" {
+		return DefaultDashboardAddr
+	}
+	return c.Dashboard.Addr
+}
+
+// DashboardURLPath returns the file that holds the running dashboard's URL.
+func (c *Config) DashboardURLPath() string {
+	return c.resolve("", DashboardURLFile)
 }
 
 // PinsPath returns the pin file's path, or "" if pinning is off.

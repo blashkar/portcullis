@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -20,8 +21,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/blashkar/portcullis/internal/approval"
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
+	"github.com/blashkar/portcullis/internal/dashboard"
 	"github.com/blashkar/portcullis/internal/gateway"
 	"github.com/blashkar/portcullis/internal/inject"
 	"github.com/blashkar/portcullis/internal/ollama"
@@ -54,7 +57,10 @@ Secrets in what servers send back are redacted, and results are checked
 for prompt injection, optionally with a local guard model through Ollama.
 Every message, with the
 policy's decision, is logged and recorded in a SQLite audit log, which
-"portcullis audit" searches.`,
+"portcullis audit" searches.
+
+With the dashboard on, calls a rule says need approval wait until someone
+approves or denies them on a local web page ("portcullis dashboard --open").`,
 		Example: `  portcullis serve --config portcullis.yaml
   claude mcp add portcullis -- /home/user/portcullis/bin/portcullis serve --config /home/user/portcullis/portcullis.yaml`,
 		Args: cobra.NoArgs,
@@ -147,12 +153,57 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		log.Info("audit log", "path", path)
 	}
 
+	var dashLn net.Listener
+	var dashOpts dashboard.Options
+	if cfg.Dashboard.Enabled {
+		ln, err := listenDashboard(cfg.DashboardAddr(), log)
+		if err != nil {
+			// Nobody can approve without it, so those calls are blocked.
+			log.Error("the dashboard couldn't start; calls that need approval will be blocked", "addr", cfg.DashboardAddr(), "err", err)
+		} else {
+			dashLn = ln
+			hub := dashboard.NewHub()
+			broker := approval.NewBroker(cfg.Dashboard.ApprovalTimeout, hub.Notify)
+			feed := dashboard.NewFeed(200, hub.Notify)
+			gwOpts.Approver = broker
+			if gwOpts.Recorder != nil {
+				gwOpts.Recorder = recorders{gwOpts.Recorder, feed}
+			} else {
+				gwOpts.Recorder = feed
+			}
+			dashOpts = dashboard.Options{Hub: hub, Approvals: broker, Feed: feed, Pins: gwOpts.Pins, Version: version, SessionID: sessionID, Logger: log}
+		}
+	} else if pol.NeedsApproval() {
+		log.Warn("policy rules need approval but the dashboard is off: those calls will be blocked", "hint", "dashboard: {enabled: true}")
+	}
+
 	gw := gateway.New(gwOpts)
 	defer func() {
 		if err := gw.Close(); err != nil {
 			log.Debug("closing upstreams", "err", err)
 		}
 	}()
+
+	if dashLn != nil {
+		dashOpts.Held = gw.Held
+		d := dashboard.New(dashOpts)
+		dashCtx, stopDash := context.WithCancel(ctx)
+		defer stopDash()
+		go func() {
+			if err := d.Serve(dashCtx, dashLn); err != nil {
+				log.Error("dashboard stopped", "err", err)
+			}
+		}()
+		u := d.URL(dashLn.Addr())
+		urlFile := cfg.DashboardURLPath()
+		if err := writeURLFile(urlFile, u); err != nil {
+			log.Error("saving the dashboard's URL", "path", urlFile, "err", err)
+		} else {
+			defer removeURLFile(urlFile, u)
+		}
+		// The token stays out of the logs, which other programs may keep.
+		log.Info("dashboard", "url", withoutToken(u), "full_url_in", urlFile, "open_with", "portcullis dashboard --open")
+	}
 
 	if err := connectAll(ctx, gw, cfg, names, opts); err != nil {
 		return err

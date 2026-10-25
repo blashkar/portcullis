@@ -312,6 +312,20 @@ func (r *rule) matchesTool(tool string) bool {
 	return r.tools.Match(tool)
 }
 
+// NeedsApproval reports whether any enforced rule asks for a person's
+// approval.
+func (p *Policy) NeedsApproval() bool {
+	if p == nil || p.logOnly {
+		return false
+	}
+	for _, r := range p.rules {
+		if r.action == RequireApproval && !r.logOnly {
+			return true
+		}
+	}
+	return false
+}
+
 // Unused returns the names of the rules whose tool patterns match none of
 // the given tools, which usually means a typo.
 func (p *Policy) Unused(tools []string) []string {

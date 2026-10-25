@@ -36,6 +36,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/blashkar/portcullis/internal/approval"
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
 	"github.com/blashkar/portcullis/internal/pin"
@@ -59,6 +60,9 @@ type Options struct {
 	Logger    *slog.Logger
 	Recorder  Recorder       // nil disables the audit log
 	Policy    *policy.Policy // nil allows every call
+	// Approver asks a person about calls the policy says need approval.
+	// Without one, those calls are blocked.
+	Approver Approver
 
 	Pins     *pin.Store    // nil turns tool pinning off
 	PinPoll  time.Duration // how often to look for approvals; 0 means DefaultPinPoll
@@ -319,7 +323,12 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 		if g.opts.Policy != nil {
 			d := g.opts.Policy.Check(policy.Call{Tool: req.Params.Name, Server: upstream, Args: args})
 			g.noteDecision(ctx, req.Params.Name, d)
-			if d.Blocked() {
+			switch {
+			case g.needsApproval(d):
+				if err := g.askApproval(ctx, req.Params.Name, upstream, forward, d); err != nil {
+					return nil, err
+				}
+			case d.Blocked():
 				return nil, blockedError(req.Params.Name, d)
 			}
 		}
@@ -420,12 +429,17 @@ func (g *Gateway) noteDecision(ctx context.Context, tool string, d policy.Decisi
 		n.decision = &d
 	}
 	attrs := []any{"tool", tool, "decision", d.Outcome(), "rule", d.Rule, "reason", d.Reason}
-	if d.Blocked() {
+	if d.Blocked() && !g.needsApproval(d) {
 		g.log.Warn("call blocked by policy", attrs...)
 	}
 	if w := d.Would; w != nil {
 		g.log.Warn("log_only policy would decide differently", "tool", tool, "decision", d.Outcome(), "would", w.Outcome(), "rule", w.Rule, "reason", w.Reason)
 	}
+}
+
+// needsApproval reports whether a call waits for a person's decision.
+func (g *Gateway) needsApproval(d policy.Decision) bool {
+	return d.Action == policy.RequireApproval && !d.RateLimited && g.opts.Approver != nil
 }
 
 func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
@@ -622,6 +636,12 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 				e.Decision, e.Rule, e.Reason = d.Outcome(), d.Rule, d.Reason
 				if d.Would != nil {
 					e.WouldDecision, e.WouldRule = d.Would.Outcome(), d.Would.Rule
+				}
+			}
+			if note.approval != 0 {
+				e.Reason = approvalReason(note.approval)
+				if note.approval == approval.Approved {
+					e.Decision = audit.DecisionApproved
 				}
 			}
 			if note.held != "" {

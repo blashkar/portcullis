@@ -6,3 +6,5 @@ portcullis.db*
 /portcullis.yaml
 # Pins from local runs; in your own setup, consider committing them.
 portcullis.pins.json*
+# The running dashboard's URL, which holds its token.
+portcullis.dashboard

@@ -50,6 +50,15 @@ inject:
     check: all                # all results, or only ones a pattern noticed (suspicious)
     timeout: 15s
 
+# The dashboard: a local web page where calls a require_approval rule
+# matches wait for a decision, with the tools held back and live activity.
+# Open it with `portcullis dashboard --open`. Its URL holds a random token
+# made when serve starts; anyone with the URL can approve calls.
+dashboard:
+  enabled: true
+  addr: 127.0.0.1:7878        # loopback only; other addresses are refused
+  approval_timeout: 2m        # an unanswered call is denied after this
+
 # The policy decides which tool calls go ahead. Rules are checked in order
 # and the first one that matches decides; a call no rule decides gets the
 # default. Blocked calls get a JSON-RPC error naming the rule, and every
@@ -76,8 +85,8 @@ policy:
       tool: [git__git_reset, git__git_checkout]
       action: deny
 
-    # Waits for a person to approve. Until the approval flow exists, this
-    # blocks the call.
+    # Waits until someone approves or denies it in the dashboard. Without
+    # the dashboard, the call is blocked.
     - name: confirm-commits
       tool: git__git_commit
       action: require_approval

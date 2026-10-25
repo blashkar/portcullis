@@ -1,0 +1,122 @@
+{{define "page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>portcullis</title>
+<link rel="stylesheet" href="static/style.css">
+<script src="static/app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>portcullis</h1>
+  <span class="meta">session {{.SessionID}} · {{.Version}}</span>
+  <span id="live" class="live" hidden>live</span>
+</header>
+<main id="main">
+{{template "main" .}}
+</main>
+</body>
+</html>
+{{- end}}
+
+{{define "main" -}}
+<section data-pending="{{len .Pending}}">
+  <h2>Waiting for approval</h2>
+  {{if not .Approvals}}
+  <p class="empty">Approvals are off: calls that need approval are blocked.</p>
+  {{else if not .Pending}}
+  <p class="empty">Nothing is waiting.</p>
+  {{end}}
+  {{range .Pending}}
+  <article class="pending">
+    <div class="what">
+      <span class="tool">{{visible .Tool}}</span>
+      <span class="meta">rule {{visible .Rule}}{{if .Reason}}: {{visible .Reason}}{{end}}</span>
+    </div>
+    <div class="meta">waiting since {{.Since}}, denied automatically at {{.Expires}}</div>
+    <p class="label">Arguments, exactly as they will be sent:</p>
+    <pre class="args">{{visible .Args}}</pre>
+    {{if .TooLong}}
+    <p class="warn">The arguments are {{.Size}} bytes, too long to show in full, so this call can only be denied.</p>
+    {{end}}
+    <form method="post" action="approvals" class="buttons">
+      <input type="hidden" name="id" value="{{.ID}}">
+      {{if not .TooLong}}<button name="decision" value="approve" class="approve">Approve this call</button>{{end}}
+      <button name="decision" value="deny" class="deny">Deny</button>
+    </form>
+  </article>
+  {{end}}
+</section>
+
+<section>
+  <h2>Tools held back</h2>
+  {{if not .Held}}<p class="empty">No tools are held back.</p>{{end}}
+  {{range .Held}}
+  <article class="held">
+    <div class="what"><span class="tool">{{visible .Name}}</span>{{if .Status}} <span class="badge">{{.Status}}</span>{{end}}</div>
+    <p class="meta">{{visible .Reason}}</p>
+    {{if .Diff}}
+    <details id="diff-{{.Name}}">
+      <summary>Definition {{if eq .Status "new"}}offered{{else}}changes{{end}}</summary>
+      <pre class="diff">{{range .Diff}}<span class="{{.Class}}">{{visible .Text}}</span>
+{{end}}</pre>
+    </details>
+    {{end}}
+    {{if .Hash}}
+    <form method="post" action="approve-tool" class="buttons">
+      <input type="hidden" name="tool" value="{{.Name}}">
+      <input type="hidden" name="hash" value="{{.Hash}}">
+      <button class="approve">Approve this definition</button>
+    </form>
+    {{end}}
+  </article>
+  {{end}}
+</section>
+
+<section>
+  <h2>Activity</h2>
+  {{if not .Events}}<p class="empty">Nothing yet.</p>{{end}}
+  <table class="events">
+    {{range .Events}}
+    <tr class="{{if .Failed}}failed{{end}}">
+      <td class="time">{{.Time}}</td>
+      <td>{{visible .Method}}{{if .Tool}} <span class="tool">{{visible .Tool}}</span>{{end}}</td>
+      <td>{{if .Decision}}<span class="decision {{.Decision}}">{{visible .Decision}}</span>{{end}}{{if .Rule}}<div class="meta">{{visible .Rule}}</div>{{end}}</td>
+      <td class="detail">
+        {{if .Reason}}<div>{{visible .Reason}}</div>{{end}}
+        {{if .Findings}}<div class="warn">{{visible .Findings}}</div>{{end}}
+        {{if .Error}}<div class="error">{{visible .Error}}</div>{{end}}
+        {{if or .Params .Result}}
+        <details id="{{.ID}}">
+          <summary>{{.Dir}}{{if .Server}} · {{visible .Server}}{{end}}{{if .Duration}} · {{.Duration}}{{end}}</summary>
+          {{if .Params}}<p class="label">params</p><pre>{{visible .Params}}</pre>{{end}}
+          {{if .Result}}<p class="label">result</p><pre>{{visible .Result}}</pre>{{end}}
+        </details>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+</section>
+{{- end}}
+
+{{define "gone" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<title>portcullis</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<main>
+  <p>{{.}}</p>
+  <p><a href="./">Back to the dashboard</a></p>
+</main>
+</body>
+</html>
+{{- end}}

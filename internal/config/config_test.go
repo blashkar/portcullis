@@ -225,3 +225,32 @@ inject:
 		}
 	}
 }
+
+func TestDashboardSettings(t *testing.T) {
+	cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\n"), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Enabled || cfg.DashboardAddr() != DefaultDashboardAddr || cfg.DashboardURLPath() != filepath.Join("/cfg", DashboardURLFile) {
+		t.Errorf("defaults: %+v, %s, %s", cfg.Dashboard, cfg.DashboardAddr(), cfg.DashboardURLPath())
+	}
+	for _, ok := range []string{"127.0.0.1:7878", "127.0.0.1:0", "localhost:9000", "[::1]:7878", "127.1.2.3:80"} {
+		cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\ndashboard: {enabled: true, addr: '"+ok+"', approval_timeout: 30s}\n"), "/cfg")
+		if err != nil {
+			t.Errorf("%s: %v", ok, err)
+			continue
+		}
+		if cfg.DashboardAddr() != ok || cfg.Dashboard.ApprovalTimeout != 30*time.Second {
+			t.Errorf("%s: %+v", ok, cfg.Dashboard)
+		}
+	}
+	// Anything reachable from another machine is refused, as are typos.
+	for _, bad := range []string{"0.0.0.0:7878", ":7878", "192.0.2.10:7878", "[::]:7878", "example.com:7878", "127.0.0.1", "127.0.0.1:http", "127.0.0.1:70000"} {
+		if _, err := Parse([]byte("servers: {fs: {command: [x]}}\ndashboard: {addr: '"+bad+"'}\n"), "/cfg"); err == nil {
+			t.Errorf("addr %s: no error", bad)
+		}
+	}
+	if _, err := Parse([]byte("servers: {fs: {command: [x]}}\ndashboard: {approval_timeout: -1s}\n"), "/cfg"); err == nil {
+		t.Error("negative timeout: no error")
+	}
+}

@@ -208,6 +208,24 @@ func (s *Store) Approve(names []string) ([]string, error) {
 	return approved, nil
 }
 
+// ApproveHash approves a tool's pending definition only if its hash is
+// hash: the definition a person looked at, not one the server offered
+// since. It reports whether it approved anything.
+func (s *Store) ApproveHash(name, hash string) (bool, error) {
+	var ok bool
+	err := s.update(func(f *file) bool {
+		e := f.Tools[name]
+		if e == nil || e.Pending == nil || e.Pending.Hash != hash {
+			return false
+		}
+		def := e.Pending.Definition
+		e.Hash, e.Definition, e.Approved, e.Pending = e.Pending.Hash, &def, s.now().UTC(), nil
+		ok = true
+		return true
+	})
+	return ok, err
+}
+
 // Entries returns every tool's entry.
 func (s *Store) Entries() (map[string]*Entry, error) {
 	var out map[string]*Entry
