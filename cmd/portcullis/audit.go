@@ -67,7 +67,7 @@ it shows the most recent session; --session all searches every session.`,
 	f.StringVarP(&opts.method, "method", "m", "", "only this method, such as tools/call")
 	f.BoolVar(&opts.failed, "failed", false, "only failed calls")
 	f.BoolVar(&opts.blocked, "blocked", false, "only calls the policy blocked")
-	f.StringVar(&opts.decision, "decision", "", "only calls with this policy decision: allow, deny, require_approval or rate_limit")
+	f.StringVar(&opts.decision, "decision", "", "only calls with this policy decision: allow, deny, require_approval, approved, rate_limit or held")
 	f.StringVar(&opts.rule, "rule", "", "only calls this policy rule decided, or would have")
 	f.BoolVar(&opts.logOnly, "log-only", false, "only calls a log_only rule would have decided differently")
 	f.BoolVar(&opts.flagged, "flagged", false, "only messages with findings: redacted secrets, flagged or held tools")
@@ -155,7 +155,7 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 			formatDuration(e.Duration), clean(policyText(e)), clean(status(e)))
 		// Why a call was blocked, and what portcullis found, matter enough
 		// to show without --payloads.
-		if e.Reason != "" && (blocked(e) || e.Direction == audit.Internal) {
+		if e.Reason != "" && (blocked(e) || e.Decision == audit.DecisionApproved || e.Direction == audit.Internal) {
 			details[i] = append(details[i], "reason: "+e.Reason)
 		}
 		if e.Findings != "" {
@@ -295,7 +295,7 @@ func status(e audit.Event) string {
 }
 
 func blocked(e audit.Event) bool {
-	return e.Decision != "" && e.Decision != "allow"
+	return e.Decision != "" && e.Decision != "allow" && e.Decision != audit.DecisionApproved
 }
 
 // policyText shows a decision and the rule that made it, such as

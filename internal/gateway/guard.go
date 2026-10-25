@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/blashkar/portcullis/internal/approval"
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/glob"
 	"github.com/blashkar/portcullis/internal/pin"
@@ -45,6 +46,8 @@ type callNote struct {
 	redacted redact.Counts
 	// injection summarizes what the injection checks found, if anything.
 	injection string
+	// approval is how a call that needed a person's approval ended.
+	approval approval.Outcome
 }
 
 type noteKey struct{}

@@ -37,7 +37,7 @@ type Event struct {
 	Duration  time.Duration
 
 	// The policy's decision on a tool call; empty if there's no policy.
-	Decision string // allow, deny, require_approval or rate_limit
+	Decision string // allow, deny, require_approval, approved, rate_limit or held
 	Rule     string // the rule that decided; "" for the policy's default
 	Reason   string
 	// What log_only rules would have decided, if that differs.
@@ -52,6 +52,10 @@ type Event struct {
 // DecisionHeld is the decision recorded for a call to a tool that is held
 // back because its definition changed, wasn't approved, or looks poisoned.
 const DecisionHeld = "held"
+
+// DecisionApproved is the decision recorded for a call that needed a
+// person's approval and got it.
+const DecisionApproved = "approved"
 
 // isBlocked is true for events whose call the policy stopped.
 const isBlocked = `decision IN ('deny', 'require_approval', 'rate_limit', 'held')`
