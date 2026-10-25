@@ -16,6 +16,7 @@ fuzz:
 	go test -run '^$$' -fuzz FuzzDecodeArgs -fuzztime 30s ./internal/gateway
 	go test -run '^$$' -fuzz FuzzTool -fuzztime 30s ./internal/scan
 	go test -run '^$$' -fuzz FuzzRedact -fuzztime 30s ./internal/redact
+	go test -run '^$$' -fuzz FuzzHeuristics -fuzztime 30s ./internal/inject
 
 lint:
 	golangci-lint run

@@ -36,6 +36,20 @@ scan:
 redact:
   patterns: []                 # extra formats: {name: internal_token, regex: 'itk_[a-z0-9]{32}'}
 
+# Prompt-injection checks on tool results and resources: text that tries
+# to give the AI instructions ("ignore previous instructions and ...").
+# Patterns run on everything; the guard model, a small local model through
+# Ollama, judges what they miss. If Ollama is down or slow, the patterns
+# carry on alone. warn puts a warning before the result, block withholds
+# it, log only records it.
+inject:
+  action: warn
+  guard:
+    enabled: true
+    model: gemma3:4b          # `ollama pull gemma3:4b`; see the README for other models
+    check: all                # all results, or only ones a pattern noticed (suspicious)
+    timeout: 15s
+
 # The policy decides which tool calls go ahead. Rules are checked in order
 # and the first one that matches decides; a call no rule decides gets the
 # default. Blocked calls get a JSON-RPC error naming the rule, and every

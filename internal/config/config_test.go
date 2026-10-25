@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blashkar/portcullis/internal/policy"
 )
@@ -193,6 +194,31 @@ redact:
 		"redact: {patterns: [{name: x, regex: '('}]}",
 		"redact: {patterns: [{name: x, regex: 'a*'}]}",
 		"redact: {patterns: [{regex: 'abc'}]}",
+	} {
+		if _, err := Parse([]byte("servers: {fs: {command: [x]}}\n"+bad), "/cfg"); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
+	}
+}
+
+func TestInjectSettings(t *testing.T) {
+	cfg, err := Parse([]byte(`
+servers: {fs: {command: [x]}}
+inject:
+  action: block
+  guard: {enabled: true, model: llama3.2:3b, check: suspicious, timeout: 5s}
+`), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := cfg.Inject.Guard; cfg.Inject.Action != "block" || !g.Enabled || g.Model != "llama3.2:3b" || g.Check != "suspicious" || g.Timeout != 5*time.Second {
+		t.Errorf("inject = %+v", cfg.Inject)
+	}
+	for _, bad := range []string{
+		"inject: {action: quarantine}",
+		"inject: {guard: {check: some}}",
+		"inject: {guard: {timeout: -1s}}",
+		"inject: {guard: {timeout: soon}}",
 	} {
 		if _, err := Parse([]byte("servers: {fs: {command: [x]}}\n"+bad), "/cfg"); err == nil {
 			t.Errorf("%s: no error", bad)

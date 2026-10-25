@@ -43,6 +43,8 @@ type callNote struct {
 	decision *policy.Decision
 	held     string // why the tool is held, if it is
 	redacted redact.Counts
+	// injection summarizes what the injection checks found, if anything.
+	injection string
 }
 
 type noteKey struct{}
