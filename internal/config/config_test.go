@@ -148,3 +148,54 @@ policy:
 		}
 	}
 }
+
+func TestGuardSettings(t *testing.T) {
+	cfg, err := Parse([]byte("servers: {fs: {command: [x]}}"), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Secure by default.
+	if cfg.PinsPath() != "/cfg/portcullis.pins.json" || cfg.HoldNewTools() || cfg.Scan.Tools != "" {
+		t.Errorf("defaults: pins %q, hold %v, scan %q", cfg.PinsPath(), cfg.HoldNewTools(), cfg.Scan.Tools)
+	}
+	if r, err := cfg.Redactor(); r == nil || err != nil {
+		t.Errorf("redactor = %v, %v", r, err)
+	}
+
+	cfg, err = Parse([]byte(`
+servers: {fs: {command: [x]}}
+pins: {path: /var/lib/pins.json, new_tools: hold}
+scan: {tools: log, ignore: ["fs__*"]}
+redact:
+  patterns:
+    - {name: internal_token, regex: 'itk_[a-z0-9]{8}'}
+`), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PinsPath() != "/var/lib/pins.json" || !cfg.HoldNewTools() || !cfg.ScanIgnore().Match("fs__read_file") {
+		t.Errorf("settings: %+v", cfg)
+	}
+	r, _ := cfg.Redactor()
+	if out, _ := r.String("itk_abcd1234"); out != "[REDACTED:internal_token]" {
+		t.Errorf("custom pattern: %q", out)
+	}
+
+	cfg, _ = Parse([]byte("servers: {fs: {command: [x]}}\npins: {disabled: true}\nredact: {disabled: true}"), "/cfg")
+	if r, _ := cfg.Redactor(); cfg.PinsPath() != "" || r != nil {
+		t.Error("disabling didn't")
+	}
+
+	for _, bad := range []string{
+		"pins: {new_tools: trust}",
+		"scan: {tools: block}",
+		`scan: {ignore: [""]}`,
+		"redact: {patterns: [{name: x, regex: '('}]}",
+		"redact: {patterns: [{name: x, regex: 'a*'}]}",
+		"redact: {patterns: [{regex: 'abc'}]}",
+	} {
+		if _, err := Parse([]byte("servers: {fs: {command: [x]}}\n"+bad), "/cfg"); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
+	}
+}

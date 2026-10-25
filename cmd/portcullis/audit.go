@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ type auditOptions struct {
 	decision   string
 	rule       string
 	logOnly    bool
+	flagged    bool
 	since      time.Duration
 	limit      int
 	asJSON     bool
@@ -45,6 +47,7 @@ it shows the most recent session; --session all searches every session.`,
   portcullis audit --failed --payloads
   portcullis audit --blocked --session all
   portcullis audit --log-only        # what log_only rules would have changed
+  portcullis audit --flagged --session all   # redactions, flagged and held tools
   portcullis audit sessions`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -67,6 +70,7 @@ it shows the most recent session; --session all searches every session.`,
 	f.StringVar(&opts.decision, "decision", "", "only calls with this policy decision: allow, deny, require_approval or rate_limit")
 	f.StringVar(&opts.rule, "rule", "", "only calls this policy rule decided, or would have")
 	f.BoolVar(&opts.logOnly, "log-only", false, "only calls a log_only rule would have decided differently")
+	f.BoolVar(&opts.flagged, "flagged", false, "only messages with findings: redacted secrets, flagged or held tools")
 	f.DurationVar(&opts.since, "since", 0, "only messages from this long ago, such as 1h")
 	f.BoolVarP(&opts.payloads, "payloads", "p", false, "show each message's params and result")
 
@@ -109,7 +113,7 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 
 	f := audit.Filter{
 		Tool: opts.tool, Upstream: opts.upstream, Method: opts.method, OnlyFails: opts.failed,
-		Blocked: opts.blocked, Decision: opts.decision, Rule: opts.rule, LogOnly: opts.logOnly, Limit: opts.limit,
+		Blocked: opts.blocked, Decision: opts.decision, Rule: opts.rule, LogOnly: opts.logOnly, Flagged: opts.flagged, Limit: opts.limit,
 	}
 	switch opts.session {
 	case "all":
@@ -139,25 +143,57 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 	if f.SessionID != "" {
 		fmt.Fprintf(out, "session %s\n\n", f.SessionID)
 	}
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	// Align the rows first, then put each event's details under its row:
+	// lines with fewer cells would break the table's alignment.
+	var table bytes.Buffer
+	tw := tabwriter.NewWriter(&table, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TIME\tDIRECTION\tSERVER\tMETHOD\tTOOL\tDURATION\tPOLICY\tSTATUS")
-	for _, e := range events {
+	details := make([][]string, len(events))
+	for i, e := range events {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			e.Time.Local().Format("15:04:05.000"), e.Direction, dash(e.Upstream), e.Method, dash(e.Tool),
-			formatDuration(e.Duration), policyText(e), status(e))
+			e.Time.Local().Format("15:04:05.000"), e.Direction, clean(dash(e.Upstream)), clean(e.Method), clean(dash(e.Tool)),
+			formatDuration(e.Duration), clean(policyText(e)), clean(status(e)))
+		// Why a call was blocked, and what portcullis found, matter enough
+		// to show without --payloads.
+		if e.Reason != "" && (blocked(e) || e.Direction == audit.Internal) {
+			details[i] = append(details[i], "reason: "+e.Reason)
+		}
+		if e.Findings != "" {
+			details[i] = append(details[i], "findings: "+e.Findings)
+		}
 		if opts.payloads {
-			if e.Reason != "" {
-				fmt.Fprintf(tw, "\t  reason: %s\n", e.Reason)
-			}
 			if e.Params != "" {
-				fmt.Fprintf(tw, "\t  params: %s\n", e.Params)
+				details[i] = append(details[i], "params: "+e.Params)
 			}
 			if e.Result != "" {
-				fmt.Fprintf(tw, "\t  result: %s\n", e.Result)
+				details[i] = append(details[i], "result: "+e.Result)
 			}
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	rows := strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n")
+	fmt.Fprintln(out, rows[0])
+	for i, row := range rows[1:] {
+		fmt.Fprintln(out, row)
+		for _, d := range details[i] {
+			fmt.Fprintln(out, "              "+clean(d))
+		}
+	}
+	return nil
+}
+
+// clean escapes control characters in text that came from a server or
+// client, so it can't move the cursor, rewrite earlier lines or change a
+// terminal's settings with escape sequences when it's printed.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
 }
 
 func runAuditSessions(cmd *cobra.Command, opts auditOptions) error {
@@ -185,7 +221,7 @@ func runAuditSessions(cmd *cobra.Command, opts auditOptions) error {
 			dur = s.Ended.Sub(s.Started).Round(time.Second).String()
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\n",
-			s.ID, s.Started.Local().Format("2006-01-02 15:04"), dur, dash(s.Client), s.Upstreams, s.Events, s.ToolCallCount, s.BlockedCalls, s.FailedEvents)
+			s.ID, s.Started.Local().Format("2006-01-02 15:04"), dur, clean(dash(s.Client)), s.Upstreams, s.Events, s.ToolCallCount, s.BlockedCalls, s.FailedEvents)
 	}
 	return tw.Flush()
 }
@@ -231,15 +267,22 @@ func eventJSON(e audit.Event) any {
 		Reason    string    `json:"reason,omitempty"`
 		Would     string    `json:"log_only_decision,omitempty"`
 		WouldRule string    `json:"log_only_rule,omitempty"`
+		Findings  string    `json:"findings,omitempty"`
 	}{
 		e.ID, e.SessionID, e.Time, e.Direction, e.Upstream, e.Method, e.Tool, raw(e.Params), raw(e.Result),
 		e.Error, e.IsError, float64(e.Duration.Microseconds()) / 1000,
-		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule,
+		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings,
 	}
 }
 
 func status(e audit.Event) string {
 	switch {
+	case e.Method == "tool/changed" || e.Method == "tool/held":
+		return "held"
+	case e.Method == "tool/flagged":
+		return "flagged"
+	case e.Method == "tool/pinned":
+		return "pinned"
 	case blocked(e):
 		return "blocked"
 	case e.Error != "":

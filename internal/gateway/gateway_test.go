@@ -80,17 +80,25 @@ func start(t *testing.T, upstreams map[string]*mcp.Server) *harness {
 
 func startWithPolicy(t *testing.T, upstreams map[string]*mcp.Server, pol *policy.Policy) *harness {
 	t.Helper()
+	return startWith(t, upstreams, func(o *Options) { o.Policy = pol })
+}
+
+// startWith is start with options set by configure.
+func startWith(t *testing.T, upstreams map[string]*mcp.Server, configure func(*Options)) *harness {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h := &harness{t: t, ctx: ctx, rec: &fakeRecorder{}, upstream: map[string]*mcp.ServerSession{}}
-	h.gw = New(Options{
-		Version: "test", SessionID: "sess-1", Recorder: h.rec, Policy: pol,
+	opts := Options{
+		Version: "test", SessionID: "sess-1", Recorder: h.rec,
 		OnClientInfo: func(name, version string) {
 			h.clientMu.Lock()
 			h.info = name + " " + version
 			h.clientMu.Unlock()
 		},
-	})
+	}
+	configure(&opts)
+	h.gw = New(opts)
 	t.Cleanup(func() { _ = h.gw.Close() })
 
 	names := slices.Sorted(func(yield func(string) bool) {

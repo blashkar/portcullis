@@ -19,6 +19,7 @@ import (
 	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/config"
 	"github.com/blashkar/portcullis/internal/gateway"
+	"github.com/blashkar/portcullis/internal/pin"
 )
 
 type serveOptions struct {
@@ -40,8 +41,12 @@ and prompts get its name as a prefix (fs__read_file), so names can't
 collide, and each call goes to the server it belongs to.
 
 Before a tool call is forwarded, the policy in the config file decides
-whether it may go ahead. Every message, with the policy's decision, is
-logged and recorded in a SQLite audit log, which "portcullis audit" searches.`,
+whether it may go ahead. Tools are pinned and scanned before they are
+offered: one whose definition changed since it was approved, or that looks
+poisoned, is held back ("portcullis pin" reviews and approves changes).
+Secrets in what servers send back are redacted. Every message, with the
+policy's decision, is logged and recorded in a SQLite audit log, which
+"portcullis audit" searches.`,
 		Example: `  portcullis serve --config portcullis.yaml
   claude mcp add portcullis -- /home/user/portcullis/bin/portcullis serve --config /home/user/portcullis/portcullis.yaml`,
 		Args: cobra.NoArgs,
@@ -76,7 +81,26 @@ func runServe(ctx context.Context, opts serveOptions) error {
 	if err != nil {
 		return err
 	}
-	gwOpts := gateway.Options{Version: version, SessionID: sessionID, Logger: log, Policy: pol}
+	redactor, err := cfg.Redactor()
+	if err != nil {
+		return err
+	}
+	gwOpts := gateway.Options{Version: version, SessionID: sessionID, Logger: log, Policy: pol, Redactor: redactor}
+	if path := cfg.PinsPath(); path != "" {
+		gwOpts.Pins = pin.Open(path, cfg.HoldNewTools())
+		log.Info("pinning tool definitions", "path", path)
+	} else {
+		log.Warn("tool pinning is off: changed tool definitions won't be caught")
+	}
+	switch cfg.Scan.Tools {
+	case "", "hide":
+		gwOpts.Scan = gateway.ScanOptions{Enabled: true, Hide: true, Ignore: cfg.ScanIgnore()}
+	case "log":
+		gwOpts.Scan = gateway.ScanOptions{Enabled: true, Ignore: cfg.ScanIgnore()}
+	}
+	if redactor == nil {
+		log.Warn("secret redaction is off")
+	}
 	if path := cfg.AuditPath(); path != "" {
 		store, err := audit.Open(path, cfg.MaxPayload())
 		if err != nil {
@@ -111,6 +135,12 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	if err := connectAll(ctx, gw, cfg, names, opts); err != nil {
 		return err
+	}
+	// Check every server's tools again now that all are known, for the
+	// scanner's cross-tool check.
+	gw.Resync(ctx)
+	for name, reason := range gw.Held() {
+		log.Warn("holding back tool", "tool", name, "reason", reason)
 	}
 	if pol == nil {
 		log.Info("no policy: every tool call is allowed")

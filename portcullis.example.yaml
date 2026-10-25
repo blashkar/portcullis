@@ -14,6 +14,28 @@ audit:
   path: portcullis.db       # relative to this file; created with mode 0600
   max_payload: 65536        # bytes of each message's params and result to keep
 
+# Tool pinning: each tool's definition is recorded the first time it's
+# seen. If a server later changes a tool (a "rug pull"), the tool is held
+# back until you review and approve it with `portcullis pin diff` and
+# `portcullis pin approve`.
+pins:
+  path: portcullis.pins.json   # relative to this file; worth committing
+  new_tools: pin               # pin: trust on first use; hold: approve each new tool too
+
+# The tool-poisoning scanner reads every tool's description and schema
+# for text aimed at the model: hidden instructions, mentions of SSH keys
+# or .env files, invisible Unicode. A tool with a high-severity finding
+# is hidden (hide), or only reported (log); off skips scanning.
+scan:
+  tools: hide
+  ignore: []                   # tool patterns you've reviewed and trust
+
+# Secrets in tool results, resources and prompts (API keys, tokens,
+# private keys, passwords in URLs) are replaced with [REDACTED:kind]
+# before the model, or the audit log, sees them.
+redact:
+  patterns: []                 # extra formats: {name: internal_token, regex: 'itk_[a-z0-9]{32}'}
+
 # The policy decides which tool calls go ahead. Rules are checked in order
 # and the first one that matches decides; a call no rule decides gets the
 # default. Blocked calls get a JSON-RPC error naming the rule, and every

@@ -43,10 +43,18 @@ type Event struct {
 	// What log_only rules would have decided, if that differs.
 	WouldDecision string
 	WouldRule     string
+
+	// Findings is what portcullis noticed in the message, such as
+	// "redacted: github_token" or a tool definition's scan findings.
+	Findings string
 }
 
+// DecisionHeld is the decision recorded for a call to a tool that is held
+// back because its definition changed, wasn't approved, or looks poisoned.
+const DecisionHeld = "held"
+
 // isBlocked is true for events whose call the policy stopped.
-const isBlocked = `decision IN ('deny', 'require_approval', 'rate_limit')`
+const isBlocked = `decision IN ('deny', 'require_approval', 'rate_limit', 'held')`
 
 // Session is one client connection.
 type Session struct {
@@ -97,6 +105,7 @@ var migrations = []string{
 	 ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE events ADD COLUMN would_decision TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE events ADD COLUMN would_rule TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE events ADD COLUMN findings TEXT NOT NULL DEFAULT '';`,
 }
 
 // Store is an open audit database. It is safe for concurrent use.
@@ -192,11 +201,11 @@ func (s *Store) EndSession(ctx context.Context, sessionID string, ended time.Tim
 func (s *Store) Record(ctx context.Context, e Event) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO events (session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
-		                     decision, rule, reason, would_decision, would_rule)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                     decision, rule, reason, would_decision, would_rule, findings)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, e.Time.UnixNano(), e.Direction, e.Upstream, e.Method, e.Tool,
 		s.truncate(e.Params), s.truncate(e.Result), e.Error, e.IsError, int64(e.Duration),
-		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule)
+		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings)
 	return err
 }
 
@@ -222,6 +231,8 @@ type Filter struct {
 	Rule      string
 	// LogOnly selects calls a log_only rule would have decided differently.
 	LogOnly bool
+	// Flagged selects events with findings: redactions, flagged tools.
+	Flagged bool
 	Since   time.Time
 	Limit   int // 0 means no limit
 }
@@ -265,12 +276,15 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 	if f.LogOnly {
 		where = append(where, "would_decision != ''")
 	}
+	if f.Flagged {
+		where = append(where, "findings != ''")
+	}
 	if !f.Since.IsZero() {
 		add("time_ns >= ?", f.Since.UnixNano())
 	}
 
 	q := `SELECT id, session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
-	             decision, rule, reason, would_decision, would_rule FROM events`
+	             decision, rule, reason, would_decision, would_rule, findings FROM events`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -293,7 +307,7 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 		var t, d int64
 		if err := rows.Scan(&e.ID, &e.SessionID, &t, &e.Direction, &e.Upstream, &e.Method, &e.Tool,
 			&e.Params, &e.Result, &e.Error, &e.IsError, &d,
-			&e.Decision, &e.Rule, &e.Reason, &e.WouldDecision, &e.WouldRule); err != nil {
+			&e.Decision, &e.Rule, &e.Reason, &e.WouldDecision, &e.WouldRule, &e.Findings); err != nil {
 			return nil, err
 		}
 		e.Time, e.Duration = time.Unix(0, t), time.Duration(d)

@@ -323,3 +323,37 @@ func TestRefusesNewerDatabase(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestFindingsAndHeldCalls(t *testing.T) {
+	s, _ := openTestStore(t, 0)
+	ctx := context.Background()
+	t0 := time.Now()
+	if err := s.StartSession(ctx, Session{ID: "s", Started: t0}); err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range []Event{
+		{Method: "tools/call", Tool: "fs__read_file", Findings: "redacted: github_token"},
+		{Method: "tool/changed", Direction: Internal, Tool: "m__add", Reason: "changed", IsError: true, Findings: "high sensitive-path in description"},
+		{Method: "tools/call", Tool: "m__add", Decision: DecisionHeld, Reason: "changed", IsError: true},
+		{Method: "tools/call", Tool: "fs__list_directory"},
+	} {
+		e.SessionID, e.Time = "s", t0.Add(time.Duration(i)*time.Millisecond)
+		if e.Direction == "" {
+			e.Direction = ClientToServer
+		}
+		if err := s.Record(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flagged, err := s.Events(ctx, Filter{Flagged: true})
+	if err != nil || len(flagged) != 2 || flagged[0].Findings != "redacted: github_token" || flagged[1].Method != "tool/changed" {
+		t.Errorf("flagged = %+v, %v", flagged, err)
+	}
+	blocked, _ := s.Events(ctx, Filter{Blocked: true})
+	if len(blocked) != 1 || blocked[0].Decision != DecisionHeld {
+		t.Errorf("blocked = %+v", blocked)
+	}
+	if sessions, _ := s.Sessions(ctx, 0); sessions[0].BlockedCalls != 1 {
+		t.Errorf("session = %+v", sessions[0])
+	}
+}

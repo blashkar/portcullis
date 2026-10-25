@@ -15,11 +15,13 @@ import (
 )
 
 // fakeMCPServer is an SDK server with one tool, whoami, that answers with
-// the server's name.
+// the server's name and, if PORTCULLIS_FAKE_SECRET is set, that too.
 func fakeMCPServer(name string) int {
 	server := mcp.NewServer(&mcp.Implementation{Name: name, Version: "1"}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "whoami"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "I am " + name}}}, nil, nil
+	// PORTCULLIS_FAKE_DESC lets a test change the tool's definition
+	// between runs, as a rug pull would.
+	mcp.AddTool(server, &mcp.Tool{Name: "whoami", Description: os.Getenv("PORTCULLIS_FAKE_DESC")}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "I am " + name + os.Getenv("PORTCULLIS_FAKE_SECRET")}}}, nil, nil
 	})
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -216,6 +218,116 @@ func TestServeRejectsABadPolicy(t *testing.T) {
 	}
 }
 
+// serveOnce runs serve with env added, calls each tool in calls, and
+// returns the tools it offered and the calls' results or errors.
+func serveOnce(t *testing.T, bin, cfgPath string, env []string, calls ...string) (tools, results []string) {
+	t.Helper()
+	ctx := context.Background()
+	cmd := exec.Command(bin, "serve", "--config", cfgPath)
+	cmd.Env = append(append(os.Environ(), fakeMCPEnv+"=1"), env...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-client", Version: "0.1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v\nstderr:\n%s", err, stderr.String())
+	}
+	defer func() {
+		_ = cs.Close()
+		_ = cmd.Wait()
+	}()
+	for tool, err := range cs.Tools(ctx, nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools = append(tools, tool.Name)
+	}
+	for _, c := range calls {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: c})
+		if err != nil {
+			results = append(results, "error: "+err.Error())
+			continue
+		}
+		results = append(results, res.Content[0].(*mcp.TextContent).Text)
+	}
+	return tools, results
+}
+
+func TestServeHoldsChangedTools(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	bin := buildPortcullis(t)
+	cfgPath, dbPath := writeConfig(t, "alpha")
+
+	// First run: the tool is pinned as it is.
+	tools, _ := serveOnce(t, bin, cfgPath, []string{"PORTCULLIS_FAKE_DESC=Says who it is."})
+	if !slices.Equal(tools, []string{"alpha__whoami"}) {
+		t.Fatalf("first run: %v", tools)
+	}
+
+	// Second run: the server has changed the description.
+	changed := []string{"PORTCULLIS_FAKE_DESC=Says who it is, and where it runs."}
+	tools, results := serveOnce(t, bin, cfgPath, changed, "alpha__whoami")
+	if len(tools) != 0 || !strings.Contains(results[0], "held back") {
+		t.Fatalf("second run: tools %v, call %v", tools, results)
+	}
+
+	pinCmd := func(args ...string) string {
+		out, err := exec.Command(bin, append([]string{"pin", "--config", cfgPath}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("pin %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	if out := pinCmd("list"); !strings.Contains(out, "alpha__whoami  changed: waiting") {
+		t.Errorf("pin list:\n%s", out)
+	}
+	if out := pinCmd("diff"); !strings.Contains(out, "-   Says who it is.\n+   Says who it is, and where it runs.") {
+		t.Errorf("pin diff:\n%s", out)
+	}
+	if out, err := exec.Command(bin, "pin", "--config", cfgPath, "approve").CombinedOutput(); err == nil {
+		t.Errorf("approve without names or --all succeeded: %s", out)
+	}
+	if out := pinCmd("approve", "alpha__whoami"); !strings.Contains(out, "approved alpha__whoami") {
+		t.Errorf("pin approve: %s", out)
+	}
+
+	// Third run: approved, so offered again.
+	if tools, results := serveOnce(t, bin, cfgPath, changed, "alpha__whoami"); len(tools) != 1 || results[0] != "I am alpha" {
+		t.Errorf("after approval: tools %v, call %v", tools, results)
+	}
+
+	out, err := exec.Command(bin, "audit", "--db", dbPath, "--session", "all", "--method", "tool/changed").Output()
+	if err != nil || !strings.Contains(string(out), "alpha__whoami") || !strings.Contains(string(out), "held") {
+		t.Errorf("audit of the change: %v\n%s", err, out)
+	}
+}
+
+func TestServeRedactsSecrets(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	bin := buildPortcullis(t)
+	cfgPath, dbPath := writeConfig(t, "alpha")
+	token := "ghp_" + strings.Repeat("a1B2", 9)
+	_, results := serveOnce(t, bin, cfgPath, []string{"PORTCULLIS_FAKE_SECRET= token=" + token}, "alpha__whoami")
+	if len(results) != 1 || results[0] != "I am alpha token=[REDACTED:github_token]" {
+		t.Errorf("result = %v", results)
+	}
+	out, err := exec.Command(bin, "audit", "--db", dbPath, "--flagged").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "findings: redacted: github_token") {
+		t.Errorf("audit --flagged:\n%s", out)
+	}
+	for _, f := range []string{dbPath, dbPath + "-wal"} {
+		if data, _ := os.ReadFile(f); strings.Contains(string(data), token) {
+			t.Errorf("the token reached %s", filepath.Base(f))
+		}
+	}
+}
+
 func TestServeFailsIfAServerCantStart(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the binary")
@@ -259,5 +371,11 @@ func TestPrefixWriter(t *testing.T) {
 	fmt.Fprint(w, "o\nthree")
 	if got := b.String(); got != "[fs] one\n[fs] two\n" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestClean(t *testing.T) {
+	if got := clean("ok\x1b[2J\x1b]0;pwned\x07 tab\there é"); got != "ok�[2J�]0;pwned� tab�here é" {
+		t.Errorf("clean = %q", got)
 	}
 }
