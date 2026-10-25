@@ -135,6 +135,87 @@ func TestServeAndAudit(t *testing.T) {
 	}
 }
 
+// appendConfig adds YAML to the end of a config file.
+func appendConfig(t *testing.T, cfgPath, extra string) {
+	t.Helper()
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(extra); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServeEnforcesPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	bin := buildPortcullis(t)
+	cfgPath, dbPath := writeConfig(t, "alpha", "beta")
+	appendConfig(t, cfgPath, `policy:
+  rules:
+    - name: beta-off
+      tool: "beta__*"
+      action: deny
+      reason: beta is being decommissioned
+    - name: typo
+      tool: gamma__whoami
+      action: deny
+`)
+	ctx := context.Background()
+	cmd := exec.Command(bin, "serve", "--config", cfgPath)
+	cmd.Env = append(os.Environ(), fakeMCPEnv+"=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-client", Version: "0.1"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "alpha__whoami"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "beta__whoami"})
+	if err == nil || !strings.Contains(err.Error(), "beta is being decommissioned") {
+		t.Errorf("blocked call: %v", err)
+	}
+	_ = cs.Close()
+	_ = cmd.Wait()
+	if !strings.Contains(stderr.String(), "policy rules that match no tool") || !strings.Contains(stderr.String(), "typo") {
+		t.Errorf("no warning about the unused rule; stderr:\n%s", stderr.String())
+	}
+
+	out, err := exec.Command(bin, "audit", "--db", dbPath, "--blocked").Output()
+	if err != nil {
+		t.Fatalf("audit --blocked: %v", err)
+	}
+	if !strings.Contains(string(out), "beta__whoami") || !strings.Contains(string(out), "deny beta-off") || strings.Contains(string(out), "alpha__whoami") {
+		t.Errorf("audit --blocked:\n%s", out)
+	}
+	out, err = exec.Command(bin, "audit", "sessions", "--db", dbPath, "--json").Output()
+	if err != nil {
+		t.Fatalf("audit sessions: %v", err)
+	}
+	var sess map[string]any
+	if err := json.Unmarshal(out, &sess); err != nil || sess["BlockedCalls"] != 1.0 || sess["ToolCallCount"] != 2.0 {
+		t.Errorf("session = %s (%v)", out, err)
+	}
+}
+
+func TestServeRejectsABadPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	bin := buildPortcullis(t)
+	cfgPath, _ := writeConfig(t, "alpha")
+	appendConfig(t, cfgPath, "policy:\n  rules:\n    - tool: alpha__whoami\n      when: 'args.path.startsWith('\n      action: deny\n")
+	out, _ := exec.Command(bin, "serve", "--config", cfgPath).CombinedOutput()
+	if !strings.Contains(string(out), "policy: rule 1: when:") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
 func TestServeFailsIfAServerCantStart(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the binary")

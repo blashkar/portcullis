@@ -1,5 +1,6 @@
 // Package config loads the portcullis serve configuration: which upstream
-// MCP servers to run and where to keep the audit log.
+// MCP servers to run, where to keep the audit log, and the policy that
+// decides which tool calls may go ahead.
 //
 //	servers:
 //	  fs:
@@ -8,6 +9,10 @@
 //	    command: [sandbox/run.sh, git]
 //	audit:
 //	  path: portcullis.db
+//	policy:
+//	  rules:
+//	    - tool: git__git_reset
+//	      action: deny
 package config
 
 import (
@@ -21,6 +26,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/blashkar/portcullis/internal/policy"
 )
 
 // Separator joins a server's name and one of its tool or prompt names:
@@ -39,6 +46,8 @@ const DefaultMaxPayload = 64 << 10
 type Config struct {
 	Servers map[string]Server `yaml:"servers"`
 	Audit   Audit             `yaml:"audit"`
+	// Policy decides which tool calls may go ahead; see package policy.
+	Policy policy.Spec `yaml:"policy"`
 
 	// Dir is the directory of the config file. Relative paths in the config
 	// are resolved against it, so a client can start portcullis from anywhere.
@@ -115,7 +124,19 @@ func (c *Config) validate() error {
 	if c.Audit.MaxPayload < 0 {
 		errs = append(errs, errors.New("audit.max_payload can't be negative"))
 	}
+	if _, err := c.CompilePolicy(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// CompilePolicy compiles the policy section. It returns nil, which allows
+// every call, if the config has no policy.
+func (c *Config) CompilePolicy() (*policy.Policy, error) {
+	if c.Policy.Default == "" && !c.Policy.LogOnly && len(c.Policy.Rules) == 0 {
+		return nil, nil
+	}
+	return policy.Compile(c.Policy)
 }
 
 // ServerNames returns the server names in sorted order.

@@ -35,7 +35,18 @@ type Event struct {
 	Error     string // a protocol error; tool failures are in Result with IsError
 	IsError   bool   // the call failed, as a protocol error or a tool error
 	Duration  time.Duration
+
+	// The policy's decision on a tool call; empty if there's no policy.
+	Decision string // allow, deny, require_approval or rate_limit
+	Rule     string // the rule that decided; "" for the policy's default
+	Reason   string
+	// What log_only rules would have decided, if that differs.
+	WouldDecision string
+	WouldRule     string
 }
+
+// isBlocked is true for events whose call the policy stopped.
+const isBlocked = `decision IN ('deny', 'require_approval', 'rate_limit')`
 
 // Session is one client connection.
 type Session struct {
@@ -48,6 +59,7 @@ type Session struct {
 	Events        int
 	FailedEvents  int
 	ToolCallCount int
+	BlockedCalls  int
 }
 
 const schema = `
@@ -77,6 +89,16 @@ CREATE INDEX IF NOT EXISTS events_session ON events(session_id, time_ns);
 CREATE INDEX IF NOT EXISTS events_tool ON events(tool);
 `
 
+// migrations bring a database from schema version i to i+1. Version 0 is
+// the schema above, from before the policy engine.
+var migrations = []string{
+	`ALTER TABLE events ADD COLUMN decision TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE events ADD COLUMN rule TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE events ADD COLUMN would_decision TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE events ADD COLUMN would_rule TEXT NOT NULL DEFAULT '';`,
+}
+
 // Store is an open audit database. It is safe for concurrent use.
 type Store struct {
 	db         *sql.DB
@@ -102,11 +124,43 @@ func Open(path string, maxPayload int) (*Store, error) {
 	// One connection: SQLite allows one writer at a time anyway, and this
 	// keeps writes from separate goroutines from contending for the lock.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("audit: creating schema in %s: %w", path, err)
+		return nil, fmt.Errorf("audit: setting up %s: %w", path, err)
 	}
 	return &Store{db: db, maxPayload: maxPayload}, nil
+}
+
+// migrate creates the schema or brings an older database up to date. The
+// schema version is kept in SQLite's user_version.
+func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version > len(migrations) {
+		return fmt.Errorf("the database is from a newer portcullis (schema version %d; this one knows %d)", version, len(migrations))
+	}
+	if version == len(migrations) {
+		return nil
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	for i := version; i < len(migrations); i++ {
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			return fmt.Errorf("upgrading the schema to version %d: %w", i+1, err)
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations))); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Close closes the database.
@@ -137,10 +191,12 @@ func (s *Store) EndSession(ctx context.Context, sessionID string, ended time.Tim
 // Record stores an event.
 func (s *Store) Record(ctx context.Context, e Event) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events (session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO events (session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
+		                     decision, rule, reason, would_decision, would_rule)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, e.Time.UnixNano(), e.Direction, e.Upstream, e.Method, e.Tool,
-		s.truncate(e.Params), s.truncate(e.Result), e.Error, e.IsError, int64(e.Duration))
+		s.truncate(e.Params), s.truncate(e.Result), e.Error, e.IsError, int64(e.Duration),
+		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule)
 	return err
 }
 
@@ -161,8 +217,13 @@ type Filter struct {
 	Method    string
 	Upstream  string
 	OnlyFails bool
-	Since     time.Time
-	Limit     int // 0 means no limit
+	Blocked   bool // only calls the policy stopped
+	Decision  string
+	Rule      string
+	// LogOnly selects calls a log_only rule would have decided differently.
+	LogOnly bool
+	Since   time.Time
+	Limit   int // 0 means no limit
 }
 
 // Events returns the matching events, oldest first.
@@ -191,11 +252,25 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 	if f.OnlyFails {
 		where = append(where, "is_error = 1")
 	}
+	if f.Blocked {
+		where = append(where, isBlocked)
+	}
+	if f.Decision != "" {
+		add("decision = ?", f.Decision)
+	}
+	if f.Rule != "" {
+		add("(rule = ? OR would_rule = ?)", f.Rule)
+		args = append(args, f.Rule)
+	}
+	if f.LogOnly {
+		where = append(where, "would_decision != ''")
+	}
 	if !f.Since.IsZero() {
 		add("time_ns >= ?", f.Since.UnixNano())
 	}
 
-	q := `SELECT id, session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns FROM events`
+	q := `SELECT id, session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
+	             decision, rule, reason, would_decision, would_rule FROM events`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -217,7 +292,8 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 		var e Event
 		var t, d int64
 		if err := rows.Scan(&e.ID, &e.SessionID, &t, &e.Direction, &e.Upstream, &e.Method, &e.Tool,
-			&e.Params, &e.Result, &e.Error, &e.IsError, &d); err != nil {
+			&e.Params, &e.Result, &e.Error, &e.IsError, &d,
+			&e.Decision, &e.Rule, &e.Reason, &e.WouldDecision, &e.WouldRule); err != nil {
 			return nil, err
 		}
 		e.Time, e.Duration = time.Unix(0, t), time.Duration(d)
@@ -230,7 +306,8 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 func (s *Store) Sessions(ctx context.Context, limit int) ([]Session, error) {
 	q := `
 	SELECT s.id, s.started_ns, COALESCE(s.ended_ns, 0), s.client, s.version, s.upstreams,
-	       COUNT(e.id), COALESCE(SUM(e.is_error), 0), COALESCE(SUM(e.method = 'tools/call'), 0)
+	       COUNT(e.id), COALESCE(SUM(e.is_error), 0), COALESCE(SUM(e.method = 'tools/call'), 0),
+	       COALESCE(SUM(e.` + isBlocked + `), 0)
 	FROM sessions s LEFT JOIN events e ON e.session_id = s.id
 	GROUP BY s.id ORDER BY s.started_ns DESC`
 	if limit > 0 {
@@ -246,7 +323,7 @@ func (s *Store) Sessions(ctx context.Context, limit int) ([]Session, error) {
 		var sess Session
 		var started, ended int64
 		if err := rows.Scan(&sess.ID, &started, &ended, &sess.Client, &sess.Version, &sess.Upstreams,
-			&sess.Events, &sess.FailedEvents, &sess.ToolCallCount); err != nil {
+			&sess.Events, &sess.FailedEvents, &sess.ToolCallCount, &sess.BlockedCalls); err != nil {
 			return nil, err
 		}
 		sess.Started = time.Unix(0, started)

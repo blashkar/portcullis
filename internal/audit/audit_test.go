@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -206,5 +207,119 @@ func TestEventsOrderedByTime(t *testing.T) {
 	got, err := s.Events(ctx, Filter{})
 	if err != nil || len(got) != 2 || got[0].Method != "slow" || got[1].Method != "fast" {
 		t.Errorf("got %+v, %v; want slow then fast", got, err)
+	}
+}
+
+func TestPolicyDecisions(t *testing.T) {
+	s, _ := openTestStore(t, 0)
+	ctx := context.Background()
+	t0 := time.Now()
+	if err := s.StartSession(ctx, Session{ID: "s", Started: t0}); err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range []Event{
+		{Tool: "fs__read_file", Decision: "allow"},
+		{Tool: "fs__read_file", Decision: "deny", Rule: "fs-workspace-only", Reason: "outside /workspace", IsError: true},
+		{Tool: "git__git_commit", Decision: "require_approval", Rule: "confirm-commits", IsError: true},
+		{Tool: "fs__read_file", Decision: "rate_limit", Rule: "budget", IsError: true},
+		{Tool: "everything__echo", Decision: "allow", WouldDecision: "deny", WouldRule: "trial"},
+		{Tool: "everything__echo"}, // no policy
+	} {
+		e.SessionID, e.Time, e.Direction, e.Method = "s", t0.Add(time.Duration(i)*time.Millisecond), ClientToServer, "tools/call"
+		if err := s.Record(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name string
+		f    Filter
+		want string // decisions, in order
+	}{
+		{"blocked", Filter{Blocked: true}, "deny require_approval rate_limit"},
+		{"decision", Filter{Decision: "allow"}, "allow allow"},
+		{"rule, enforced or not", Filter{Rule: "trial"}, "allow"},
+		{"log_only hits", Filter{LogOnly: true}, "allow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.Events(ctx, tt.f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ds []string
+			for _, e := range got {
+				ds = append(ds, e.Decision)
+			}
+			if strings.Join(ds, " ") != tt.want {
+				t.Errorf("got %q, want %q", strings.Join(ds, " "), tt.want)
+			}
+		})
+	}
+	got, _ := s.Events(ctx, Filter{Rule: "fs-workspace-only"})
+	if len(got) != 1 || got[0].Reason != "outside /workspace" {
+		t.Errorf("round trip: %+v", got)
+	}
+	got, _ = s.Events(ctx, Filter{LogOnly: true})
+	if len(got) != 1 || got[0].WouldDecision != "deny" || got[0].WouldRule != "trial" {
+		t.Errorf("round trip: %+v", got)
+	}
+	sessions, err := s.Sessions(ctx, 0)
+	if err != nil || len(sessions) != 1 || sessions[0].BlockedCalls != 3 {
+		t.Errorf("sessions = %+v, %v", sessions, err)
+	}
+}
+
+// A database written before the policy engine existed gets the new columns.
+func TestMigratesOldDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions (id, started_ns) VALUES ('old', 1);
+		INSERT INTO events (session_id, time_ns, direction, method, tool) VALUES ('old', 2, 'client->server', 'tools/call', 'fs__read_file')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	s, err := Open(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Events(context.Background(), Filter{})
+	if err != nil || len(got) != 1 || got[0].Tool != "fs__read_file" || got[0].Decision != "" {
+		t.Fatalf("old event: %+v, %v", got, err)
+	}
+	if err := s.Record(context.Background(), Event{SessionID: "old", Time: time.Now(), Direction: ClientToServer, Method: "tools/call", Decision: "deny"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	// Opening it again leaves it alone.
+	s, err = Open(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, _ := s.Events(context.Background(), Filter{Blocked: true}); len(got) != 1 {
+		t.Errorf("after reopening: %+v", got)
+	}
+}
+
+func TestRefusesNewerDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err := Open(path, 0); err == nil || !strings.Contains(err.Error(), "newer portcullis") {
+		t.Errorf("err = %v", err)
 	}
 }

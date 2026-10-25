@@ -39,8 +39,9 @@ as a single MCP server on portcullis's stdin and stdout. Each server's tools
 and prompts get its name as a prefix (fs__read_file), so names can't
 collide, and each call goes to the server it belongs to.
 
-Every message is logged and recorded in a SQLite audit log, which
-"portcullis audit" searches.`,
+Before a tool call is forwarded, the policy in the config file decides
+whether it may go ahead. Every message, with the policy's decision, is
+logged and recorded in a SQLite audit log, which "portcullis audit" searches.`,
 		Example: `  portcullis serve --config portcullis.yaml
   claude mcp add portcullis -- /home/user/portcullis/bin/portcullis serve --config /home/user/portcullis/portcullis.yaml`,
 		Args: cobra.NoArgs,
@@ -71,7 +72,11 @@ func runServe(ctx context.Context, opts serveOptions) error {
 	log := logger.With("session", sessionID)
 	names := cfg.ServerNames()
 
-	gwOpts := gateway.Options{Version: version, SessionID: sessionID, Logger: log}
+	pol, err := cfg.CompilePolicy()
+	if err != nil {
+		return err
+	}
+	gwOpts := gateway.Options{Version: version, SessionID: sessionID, Logger: log, Policy: pol}
 	if path := cfg.AuditPath(); path != "" {
 		store, err := audit.Open(path, cfg.MaxPayload())
 		if err != nil {
@@ -106,6 +111,11 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	if err := connectAll(ctx, gw, cfg, names, opts); err != nil {
 		return err
+	}
+	if pol == nil {
+		log.Info("no policy: every tool call is allowed")
+	} else if unused := pol.Unused(gw.Tools()); len(unused) > 0 {
+		log.Warn("policy rules that match no tool", "rules", strings.Join(unused, ", "))
 	}
 	log.Info("serving", "version", version, "servers", strings.Join(names, ","), "tools", len(gw.Tools()))
 

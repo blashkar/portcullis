@@ -1,6 +1,6 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build test fuzz lint fmt clean
+.PHONY: build test fuzz lint vuln fmt clean
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/portcullis ./cmd/portcullis
@@ -13,9 +13,14 @@ test:
 fuzz:
 	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/jsonrpc
 	go test -run '^$$' -fuzz FuzzReader -fuzztime 30s ./internal/jsonrpc
+	go test -run '^$$' -fuzz FuzzDecodeArgs -fuzztime 30s ./internal/gateway
 
 lint:
 	golangci-lint run
+
+# Known vulnerabilities in the code's dependencies, as far as it calls them.
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 fmt:
 	golangci-lint fmt

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/blashkar/portcullis/internal/policy"
 )
 
 func TestParse(t *testing.T) {
@@ -105,5 +107,44 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(dir, "missing.yaml")); err == nil {
 		t.Error("Load of a missing file succeeded")
+	}
+}
+
+func TestPolicySection(t *testing.T) {
+	cfg, err := Parse([]byte(`
+servers: {git: {command: [x]}}
+policy:
+  rules:
+    - name: no-reset
+      tool: git__git_reset
+      action: deny
+`), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := cfg.CompilePolicy()
+	if err != nil || pol == nil {
+		t.Fatalf("CompilePolicy = %v, %v", pol, err)
+	}
+	if d := pol.Check(policy.Call{Tool: "git__git_reset"}); d.Rule != "no-reset" {
+		t.Errorf("decision = %+v", d)
+	}
+
+	cfg, err = Parse([]byte("servers: {git: {command: [x]}}"), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol, err := cfg.CompilePolicy(); pol != nil || err != nil {
+		t.Errorf("no policy section: %v, %v", pol, err)
+	}
+
+	for _, bad := range []string{
+		"policy: {rules: [{tool: x, action: nope}]}",
+		"policy: {rules: [{tool: x, action: deny, whne: 'true'}]}", // misspelled key
+		"policy: {rules: [{tool: x, action: deny, when: 'args.'}]}",
+	} {
+		if _, err := Parse([]byte("servers: {git: {command: [x]}}\n"+bad), "/cfg"); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
 	}
 }

@@ -13,3 +13,48 @@ servers:
 audit:
   path: portcullis.db       # relative to this file; created with mode 0600
   max_payload: 65536        # bytes of each message's params and result to keep
+
+# The policy decides which tool calls go ahead. Rules are checked in order
+# and the first one that matches decides; a call no rule decides gets the
+# default. Blocked calls get a JSON-RPC error naming the rule, and every
+# decision goes into the audit log (`portcullis audit --blocked`).
+policy:
+  default: allow
+  rules:
+    # A rate limit doesn't decide unless it's exceeded, so put it first to
+    # count every call.
+    - name: call-budget
+      tool: "*"
+      rate_limit: 120/min
+
+    # The container only has /workspace, but say so here too, and catch
+    # tricks like /workspace/../etc. values() collects every path argument,
+    # including move_file's source and destination.
+    - name: fs-workspace-only
+      tool: "fs__*"
+      when: 'values(args, ["path", "paths", "source", "destination"]).exists(p, !under(p, "/workspace"))'
+      action: deny
+      reason: the filesystem tools only work under /workspace
+
+    - name: no-history-rewrites
+      tool: [git__git_reset, git__git_checkout]
+      action: deny
+
+    # Waits for a person to approve. Until the approval flow exists, this
+    # blocks the call.
+    - name: confirm-commits
+      tool: git__git_commit
+      action: require_approval
+
+    # A demo server's tool that dumps the environment.
+    - name: no-env-dumps
+      tool: everything__get-env
+      action: deny
+      reason: environment variables can hold secrets
+
+    # log_only: recorded as what it would have done, but not enforced.
+    # Try a rule this way before turning it on.
+    - name: trial-no-writes
+      tool: [fs__write_file, fs__edit_file, fs__move_file]
+      action: deny
+      log_only: true
