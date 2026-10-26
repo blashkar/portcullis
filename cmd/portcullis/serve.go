@@ -329,14 +329,26 @@ func connectAll(ctx context.Context, gw *gateway.Gateway, cfg *config.Config, na
 	return errors.Join(errs...)
 }
 
-// prefixWriter writes each line with a prefix. Partial lines are held until
-// they're complete.
+// prefixWriter writes a server's stderr, each line with a prefix. The
+// server isn't trusted, so control characters are replaced (escape
+// sequences could rewrite the terminal), a line is cut at maxStderrLine
+// rather than held in memory however long it gets, and output over
+// maxStderrRate is dropped rather than filling the disk.
 type prefixWriter struct {
 	mu     sync.Mutex
 	w      io.Writer
 	prefix string
 	buf    []byte
+
+	windowStart time.Time
+	written     int  // bytes written in the window
+	dropping    bool // over the rate; said so once
 }
+
+const (
+	maxStderrLine = 8 << 10
+	maxStderrRate = 64 << 10 // bytes a second
+)
 
 // stderrMu keeps lines from different servers from interleaving.
 var stderrMu sync.Mutex
@@ -346,17 +358,45 @@ func (p *prefixWriter) Write(b []byte) (int, error) {
 	defer p.mu.Unlock()
 	p.buf = append(p.buf, b...)
 	for {
-		i := bytes.IndexByte(p.buf, '\n')
-		if i < 0 {
-			break
+		var line []byte
+		switch i := bytes.IndexByte(p.buf, '\n'); {
+		case i >= 0 && i <= maxStderrLine:
+			line, p.buf = p.buf[:i], p.buf[i+1:]
+		case len(p.buf) >= maxStderrLine:
+			// Too long, whether or not its end has arrived: cut it.
+			line, p.buf = p.buf[:maxStderrLine], p.buf[maxStderrLine:]
+		default:
+			if len(p.buf) == 0 {
+				p.buf = nil // don't pin a large array once it's consumed
+			}
+			return len(b), nil
 		}
-		stderrMu.Lock()
-		_, err := fmt.Fprintf(p.w, "%s%s\n", p.prefix, p.buf[:i])
-		stderrMu.Unlock()
-		p.buf = p.buf[i+1:]
-		if err != nil {
+		if err := p.writeLine(line); err != nil {
 			return len(b), err
 		}
 	}
-	return len(b), nil
+}
+
+func (p *prefixWriter) writeLine(line []byte) error {
+	now := time.Now()
+	if now.Sub(p.windowStart) >= time.Second {
+		p.windowStart, p.written, p.dropping = now, 0, false
+	}
+	p.written += len(line)
+	if p.written > maxStderrRate {
+		if p.dropping {
+			return nil
+		}
+		p.dropping = true
+		line = []byte("(portcullis: dropping this server's stderr over 64 KiB a second)")
+	}
+	stderrMu.Lock()
+	defer stderrMu.Unlock()
+	// Tabs are harmless, and common in logs and stack traces.
+	parts := strings.Split(string(line), "\t")
+	for i, part := range parts {
+		parts[i] = clean(part)
+	}
+	_, err := fmt.Fprintf(p.w, "%s%s\n", p.prefix, strings.Join(parts, "\t"))
+	return err
 }

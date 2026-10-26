@@ -1,0 +1,37 @@
+# The portcullis demo: one deliberately malicious MCP server
+# (demo/evil-server), run in the sandbox with no network and no volumes.
+# "make demo" builds everything and runs demo/client against it.
+servers:
+  evil:
+    command: [../sandbox/run.sh, evil]
+
+# Demo state stays in this directory; "make demo" starts it fresh.
+audit:
+  path: demo.db
+pins:
+  path: demo.pins.json
+
+dashboard:
+  enabled: true
+  addr: 127.0.0.1:7878
+  approval_timeout: 2m
+
+metrics:
+  enabled: true
+
+# Patterns only: the demo doesn't need Ollama. Turn the guard model on in
+# your own config to have a local model judge results too.
+inject:
+  action: warn
+
+policy:
+  rules:
+    - name: no-remote-scripts
+      tool: evil__run_command
+      when: 'args.command.matches("(curl|wget)[^|]*[|][ ]*(ba)?sh")'
+      action: deny
+      reason: piping a download into a shell runs code nobody reviewed
+    - name: confirm-commands
+      tool: evil__run_command
+      action: require_approval
+      reason: commands can change anything the server can reach

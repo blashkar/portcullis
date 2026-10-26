@@ -8,3 +8,9 @@ portcullis.db*
 portcullis.pins.json*
 # The running dashboard's URL, which holds its token.
 portcullis.dashboard
+
+# Demo state
+/demo/demo.db*
+/demo/demo.pins.json*
+/demo/portcullis.dashboard
+/demo/serve.log
