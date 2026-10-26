@@ -63,6 +63,8 @@ type Config struct {
 	Inject Inject      `yaml:"inject"`
 	// Dashboard is the local web page where calls are approved.
 	Dashboard Dashboard `yaml:"dashboard"`
+	// Metrics serves Prometheus metrics.
+	Metrics Metrics `yaml:"metrics"`
 
 	// Dir is the directory of the config file. Relative paths in the config
 	// are resolved against it, so a client can start portcullis from anywhere.
@@ -151,6 +153,18 @@ type Dashboard struct {
 	ApprovalTimeout time.Duration `yaml:"approval_timeout"`
 }
 
+// Metrics configures the Prometheus metrics endpoint.
+type Metrics struct {
+	Enabled bool `yaml:"enabled"`
+	// Addr is where /metrics is served; "" means DefaultMetricsAddr. Only
+	// loopback addresses are allowed: tool names and counts say what an
+	// agent is doing.
+	Addr string `yaml:"addr"`
+}
+
+// DefaultMetricsAddr is where metrics are served by default.
+const DefaultMetricsAddr = "127.0.0.1:9464"
+
 // DefaultDashboardAddr is where the dashboard listens by default.
 const DefaultDashboardAddr = "127.0.0.1:7878"
 
@@ -182,6 +196,30 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// LoadPolicy reads just the policy section of a config file, such as a new
+// policy to try out with "portcullis replay". The file needs no servers,
+// but a full config file works too.
+func LoadPolicy(path string) (*policy.Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	p, err := cfg.CompilePolicy()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("%s has no policy section", path)
+	}
+	return p, nil
 }
 
 // Parse decodes and validates a config. dir is the directory relative paths
@@ -249,8 +287,11 @@ func (c *Config) validate() error {
 	if c.Inject.Guard.Timeout < 0 {
 		errs = append(errs, errors.New("inject.guard.timeout can't be negative"))
 	}
-	if err := checkLoopback(c.DashboardAddr()); err != nil {
+	if err := checkLoopback(c.DashboardAddr(), "the dashboard can approve tool calls"); err != nil {
 		errs = append(errs, fmt.Errorf("dashboard.addr: %w", err))
+	}
+	if err := checkLoopback(c.MetricsAddr(), "metrics say which tools an agent calls"); err != nil {
+		errs = append(errs, fmt.Errorf("metrics.addr: %w", err))
 	}
 	if c.Dashboard.ApprovalTimeout < 0 {
 		errs = append(errs, errors.New("dashboard.approval_timeout can't be negative"))
@@ -258,8 +299,9 @@ func (c *Config) validate() error {
 	return errors.Join(errs...)
 }
 
-// checkLoopback checks that addr is a host and port on this machine only.
-func checkLoopback(addr string) error {
+// checkLoopback checks that addr is a host and port on this machine only;
+// why says what makes that matter.
+func checkLoopback(addr, why string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
@@ -273,7 +315,15 @@ func checkLoopback(addr string) error {
 	if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("%s isn't a loopback address such as 127.0.0.1; the dashboard can approve tool calls, so it must not be reachable from other machines", host)
+	return fmt.Errorf("%s isn't a loopback address such as 127.0.0.1; %s, so it must not be reachable from other machines", host, why)
+}
+
+// MetricsAddr returns where metrics are served.
+func (c *Config) MetricsAddr() string {
+	if c.Metrics.Addr == "" {
+		return DefaultMetricsAddr
+	}
+	return c.Metrics.Addr
 }
 
 // DashboardAddr returns where the dashboard listens.

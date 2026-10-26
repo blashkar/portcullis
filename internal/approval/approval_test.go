@@ -149,3 +149,25 @@ func TestDecisionRacingTimeout(t *testing.T) {
 		}
 	}
 }
+
+// The race above, made certain: Ask times out after Decide has taken the
+// request but before Decide returns. The decision must still count.
+func TestDecisionJustBeforeTimeout(t *testing.T) {
+	b := NewBroker(20*time.Millisecond, nil)
+	afterDecide = func() { time.Sleep(100 * time.Millisecond) }
+	t.Cleanup(func() { afterDecide = nil })
+	errc := make(chan error, 1)
+	go func() {
+		for {
+			if p := b.Pending(); len(p) > 0 {
+				errc <- b.Decide(p[0].ID, true)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	o := b.Ask(context.Background(), Request{Tool: "x"})
+	if err := <-errc; err != nil || o != Approved {
+		t.Fatalf("Decide: %v; Ask returned %v", err, o)
+	}
+}

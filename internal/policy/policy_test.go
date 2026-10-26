@@ -175,6 +175,24 @@ rules:
 	}
 }
 
+// Calls with a recorded time, as replay checks them, are rate-limited by
+// that time rather than the clock.
+func TestRateLimitCallTime(t *testing.T) {
+	p := mustCompile(t, `
+rules:
+  - tool: "*"
+    rate_limit: 2/min
+`)
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	var got []string
+	for _, offset := range []time.Duration{0, time.Second, 2 * time.Second, 61 * time.Second} {
+		got = append(got, p.Check(Call{Tool: "fs__read", Time: start.Add(offset)}).Outcome())
+	}
+	if want := "allow allow rate_limit allow"; strings.Join(got, " ") != want {
+		t.Errorf("got %v, want %s", got, want)
+	}
+}
+
 func TestLimiterWindow(t *testing.T) {
 	l, err := parseRateLimit("2/sec")
 	if err != nil {

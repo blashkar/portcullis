@@ -59,6 +59,13 @@ dashboard:
   addr: 127.0.0.1:7878        # loopback only; other addresses are refused
   approval_timeout: 2m        # an unanswered call is denied after this
 
+# Prometheus metrics: tool calls and decisions, call durations, secrets
+# redacted, injections found, approvals and held tools. No arguments or
+# results, but tool names say what an agent is doing.
+metrics:
+  enabled: false
+  addr: 127.0.0.1:9464        # loopback only; other addresses are refused
+
 # The policy decides which tool calls go ahead. Rules are checked in order
 # and the first one that matches decides; a call no rule decides gets the
 # default. Blocked calls get a JSON-RPC error naming the rule, and every

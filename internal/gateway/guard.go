@@ -44,8 +44,10 @@ type callNote struct {
 	decision *policy.Decision
 	held     string // why the tool is held, if it is
 	redacted redact.Counts
-	// injection summarizes what the injection checks found, if anything.
+	// injection summarizes what the injection checks found, if anything,
+	// and injected is whether they judged it an injection.
 	injection string
+	injected  bool
 	// approval is how a call that needed a person's approval ended.
 	approval approval.Outcome
 }
@@ -159,7 +161,7 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 	default:
 		g.log.Info("tool pinned", attrs...)
 	}
-	g.record(context.Background(), e)
+	g.record(context.Background(), e, Details{})
 }
 
 // guard is receiving middleware that refuses calls to held tools, with an

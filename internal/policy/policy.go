@@ -101,6 +101,9 @@ type Call struct {
 	Tool   string         // the name the client used: fs__read_file
 	Server string         // the upstream server it goes to: fs
 	Args   map[string]any // decoded JSON arguments
+	// Time is when the call was made, for rate limits; zero means now.
+	// Replaying recorded calls sets it, oldest first.
+	Time time.Time
 }
 
 // Decision is the outcome of checking a call.
@@ -300,7 +303,11 @@ func (r *rule) decide(c Call) (Decision, bool) {
 		}
 	}
 	if r.limit != nil {
-		if r.limit.allow(time.Now()) {
+		now := c.Time
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if r.limit.allow(now) {
 			return Decision{}, false
 		}
 		return Decision{Action: Deny, Rule: r.name, Reason: "rate limit of " + r.limit.String() + " exceeded", RateLimited: true}, true

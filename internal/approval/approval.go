@@ -148,24 +148,35 @@ func (b *Broker) Ask(ctx context.Context, req Request) Outcome {
 
 // Decide approves or denies a waiting request.
 func (b *Broker) Decide(id string, approve bool) error {
+	o := Denied
+	if approve {
+		o = Approved
+	}
 	b.mu.Lock()
 	w, ok := b.pending[id]
 	if ok {
-		// Removed here, so a request can be decided only once.
+		// Removed here, so a request can be decided only once. The decision
+		// is sent before unlocking: Ask, after a timeout, takes the lock and
+		// then looks for a decision, so it can't miss one that got this far.
+		// The channel is buffered and only one Decide gets here, so the send
+		// doesn't block.
 		delete(b.pending, id)
+		w.decision <- o
 	}
 	b.mu.Unlock()
 	if !ok {
 		return ErrNotWaiting
 	}
-	o := Denied
-	if approve {
-		o = Approved
+	if afterDecide != nil {
+		afterDecide()
 	}
-	w.decision <- o
 	b.onChange()
 	return nil
 }
+
+// afterDecide, if set, runs once Decide has decided a request; a test uses
+// it to make Ask time out at that moment.
+var afterDecide func()
 
 // Get returns a waiting request.
 func (b *Broker) Get(id string) (Request, bool) {

@@ -15,6 +15,6 @@ It sees every JSON-RPC message in both directions, logs it, and with
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newWrapCmd(), newServeCmd(), newAuditCmd(), newPinCmd(), newDashboardCmd())
+	root.AddCommand(newWrapCmd(), newServeCmd(), newAuditCmd(), newPinCmd(), newDashboardCmd(), newReplayCmd())
 	return root
 }

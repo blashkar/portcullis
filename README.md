@@ -14,7 +14,7 @@ AI agents get their tools from [MCP](https://modelcontextprotocol.io) servers: f
 
 portcullis runs in front of your MCP servers, inspects the JSON-RPC traffic in both directions, enforces a policy on every tool call, and checks what the servers send back. It's a single Go binary. Its AI-based checks use a **local** model through Ollama, so tool data never leaves your machine.
 
-> **Status:** early development. Today portcullis puts several sandboxed MCP servers behind one connection, decides each tool call with a policy (allow/deny rules with CEL conditions on the arguments, rate limits, a log-only mode for trying rules out), holds back tools whose definitions changed or look poisoned, redacts secrets from what servers return, checks results for prompt injection with patterns and a local guard model, keeps a searchable SQLite audit log, lets a person approve or deny calls on a local dashboard, and comes with a local agent to drive it. A malicious demo server, metrics and policy replay are on the [roadmap](#roadmap).
+> **Status:** early development. Today portcullis puts several sandboxed MCP servers behind one connection, decides each tool call with a policy (allow/deny rules with CEL conditions on the arguments, rate limits, a log-only mode for trying rules out), holds back tools whose definitions changed or look poisoned, redacts secrets from what servers return, checks results for prompt injection with patterns and a local guard model, keeps a searchable SQLite audit log, lets a person approve or deny calls on a local dashboard, replays recorded sessions against a new policy, exports Prometheus metrics, and comes with a local agent to drive it. A malicious demo server and a Docker Compose demo are on the [roadmap](#roadmap).
 
 ## Quickstart
 
@@ -154,6 +154,33 @@ A blocked call never reaches the server. The client gets a JSON-RPC error (code 
 - **Typos are reported.** At startup, `serve` warns about rules whose `tool` patterns match no tool.
 
 Without a `policy` section, every call is allowed. Policies cover tool calls; prompts and resources aren't checked yet.
+
+### Trying a policy change: replay
+
+`portcullis replay` checks the tool calls of a recorded session against another policy and shows the ones it would decide differently. Nothing is sent to any server. This is a real session against the sandboxed servers, replayed against a policy that adds a `no-dotfiles` rule and a `confirm-writes` approval and drops `no-history-rewrites`:
+
+```text
+$ portcullis replay --policy new-policy.yaml
+session IN5EYCNEJB3P
+
+TIME          TOOL                BEFORE                    AFTER
+21:05:05.670  fs__write_file      allow                     require_approval confirm-writes  now blocked
+21:05:05.676  fs__write_file      allow                     deny no-dotfiles                 now blocked
+              reason: dotfiles often hold secrets
+21:05:05.678  fs__write_file      allow                     require_approval confirm-writes  now blocked
+21:05:05.682  fs__read_text_file  allow                     deny no-dotfiles                 now blocked
+              reason: dotfiles often hold secrets
+21:05:05.686  git__git_reset      deny no-history-rewrites  allow                            now allowed
+              reason: no rule matched
+
+8 tool calls replayed: 5 decided differently (4 now blocked, 1 now allowed)
+```
+
+The policy file can be a whole config or just a `policy:` section. Give a session ID from `portcullis audit sessions`, or `all`; `--all` shows the unchanged calls too, `--payloads` the arguments, and `--json` prints JSON lines. Calls are checked in order with the times they were made, so rate limits count them as they did then, and each session gets its own rate-limit state, as each `serve` had. Some limits:
+
+- Only the policy is replayed. A call to a tool that was held back never reached the policy, so it's listed but not compared, and a call the policy now allows still might not have succeeded.
+- Arguments longer than `audit.max_payload` were truncated in the audit log, so those calls can't be checked; replay says how many.
+- A call that needed approval counts as `require_approval`, however the person decided.
 
 ## Approvals and the dashboard
 
@@ -356,6 +383,36 @@ portcullis audit --json | jq .                              # JSON lines, params
 
 A call the policy stopped, or one to a held tool, is `blocked`; one the tool itself rejected, like the filesystem server refusing a path, is `failed`; a protocol error, like an unknown tool, is `error: ...`. When portcullis stops a server, that's `upstream/closed`; a server that dies on its own is a failed `upstream/disconnected`.
 
+## Metrics
+
+With `metrics: {enabled: true}`, `serve` exports [Prometheus](https://prometheus.io) metrics at `http://127.0.0.1:9464/metrics`. These are from a real run against the sandboxed filesystem and git servers: three writes, a read that returned a GitHub token, one that returned a prompt injection, and two calls the policy blocked (histogram buckets left out):
+
+```text
+portcullis_build_info{version="4ce7f3e-dirty"} 1
+portcullis_injection_findings_total{server="fs",verdict="injection"} 1
+portcullis_messages_total{direction="client->server",method="initialize"} 1
+portcullis_messages_total{direction="client->server",method="notifications/initialized"} 1
+portcullis_messages_total{direction="client->server",method="tools/call"} 8
+portcullis_secrets_redacted_total{kind="github_token",server="fs"} 1
+portcullis_tool_call_duration_seconds_sum{server="fs"} 0.011568376
+portcullis_tool_call_duration_seconds_count{server="fs"} 6
+portcullis_tool_calls_total{decision="allow",outcome="ok",server="fs",tool="fs__read_text_file"} 3
+portcullis_tool_calls_total{decision="allow",outcome="ok",server="fs",tool="fs__write_file"} 3
+portcullis_tool_calls_total{decision="deny",outcome="blocked",server="fs",tool="fs__read_text_file"} 1
+portcullis_tool_calls_total{decision="deny",outcome="blocked",server="git",tool="git__git_reset"} 1
+portcullis_tool_definitions_total{result="pinned",server="fs"} 14
+portcullis_tool_definitions_total{result="pinned",server="git"} 12
+portcullis_tools_held 0
+portcullis_tools_offered 26
+```
+
+There are also `portcullis_approvals_total{outcome}`, `portcullis_approvals_pending` (with the dashboard on), `portcullis_upstream_disconnects_total{server}`, and the standard Go and process metrics. The duration histogram covers calls that went ahead, including any wait for approval; blocked calls never reach a server, so they aren't timed.
+
+- **Loopback only**, like the dashboard: other addresses are refused when the config loads. There's no token, since the metrics can't change anything, but requests must name the address in their `Host` header, so a web page can't read them through DNS rebinding.
+- **No arguments or results.** Metrics hold tool and server names and counts. Those still say what an agent is doing, which is why they stay on this machine.
+- **Bounded.** The client can call a tool by any name, so after 500 distinct tool or server names the rest are counted as `other`, and unknown methods as `other`.
+- **One port per session.** Each `serve` is one client session. If the port is taken, say by a second session, that session logs an error and runs without metrics rather than picking a port Prometheus wouldn't know. A Prometheus in a container can't reach the host's loopback address, so run it on the host or scrape through a tunnel.
+
 ## A fully local agent: portcullis-agent
 
 You don't need a cloud AI client to use portcullis. `portcullis-agent` is a small chat agent, written from scratch in Go, that runs on a model served by [Ollama](https://ollama.com). It starts an MCP server, offers the server's tools to the model, runs the tool calls the model makes, feeds the results back, and repeats until the model answers.
@@ -438,7 +495,7 @@ For `wrap`, the single-server mode:
 4. ~~Policy engine: allow/deny rules with CEL conditions on arguments, rate limits, dry-run mode~~
 5. ~~Tool-definition pinning (rug-pull detection), tool-poisoning scanner, secret redaction, prompt-injection detection with a local guard model~~
 6. ~~Human approval flow and a local web dashboard~~
-7. A deliberately malicious demo server, a Docker Compose demo, metrics, policy replay
+7. A deliberately malicious demo server, a Docker Compose demo, ~~metrics, policy replay~~
 
 ## Development
 
@@ -450,7 +507,7 @@ make vuln   # govulncheck
 make sandbox && sandbox/check.sh filesystem   # build and verify the sandboxed servers
 ```
 
-No test needs Ollama or the network, except the guard model's evaluation, which runs only with `-tags ollama`. The end-to-end tests build the binaries and run them against fakes (the test binary re-executed as an MCP server): `wrap` covering relaying, exit codes, shutdown escalation and log files; `serve` with two servers, then `portcullis audit` reading back what it recorded, `serve` enforcing a policy, and a call approved and another denied through the dashboard over HTTP; and the full agent → portcullis → MCP server chain with a fake Ollama, in one-shot and chat mode. The gateway's tests run real SDK servers over in-memory transports, including servers that change their tool lists or exit mid-session. The scanner's tests run against the reference servers' real tool definitions and a set of poisoned ones; the redactor is fuzzed to check that redacting is idempotent. The dashboard's tests check the token, the Host check, cross-site posts, escaping and hidden characters, and that over-long arguments can only be denied. The policy tests cover path tricks (`..`, `/workspace-evil`, `~`, a list with one bad path), failing closed, log-only rules and rate limits under concurrency. The Ollama client's tests replay streams recorded from a real server.
+No test needs Ollama or the network, except the guard model's evaluation, which runs only with `-tags ollama`. The end-to-end tests build the binaries and run them against fakes (the test binary re-executed as an MCP server): `wrap` covering relaying, exit codes, shutdown escalation and log files; `serve` with two servers, then `portcullis audit` reading back what it recorded, `serve` enforcing a policy, and a call approved and another denied through the dashboard over HTTP; and the full agent → portcullis → MCP server chain with a fake Ollama, in one-shot and chat mode. The gateway's tests run real SDK servers over in-memory transports, including servers that change their tool lists or exit mid-session. The scanner's tests run against the reference servers' real tool definitions and a set of poisoned ones; the redactor is fuzzed to check that redacting is idempotent. The dashboard's tests check the token, the Host check, cross-site posts, escaping and hidden characters, and that over-long arguments can only be denied. The metrics tests check every counter against a scripted set of events, the cap on distinct tool names and the Host check; an end-to-end test scrapes a running `serve`. Replay is tested on recorded calls, including rate limits counted by recorded time, truncated arguments and log-only rules, and end to end against a session `serve` recorded. The policy tests cover path tricks (`..`, `/workspace-evil`, `~`, a list with one bad path), failing closed, log-only rules and rate limits under concurrency. The Ollama client's tests replay streams recorded from a real server.
 
 ## License
 
