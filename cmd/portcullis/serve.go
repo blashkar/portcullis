@@ -27,6 +27,7 @@ import (
 	"github.com/blashkar/portcullis/internal/dashboard"
 	"github.com/blashkar/portcullis/internal/gateway"
 	"github.com/blashkar/portcullis/internal/inject"
+	"github.com/blashkar/portcullis/internal/metrics"
 	"github.com/blashkar/portcullis/internal/ollama"
 	"github.com/blashkar/portcullis/internal/pin"
 )
@@ -155,6 +156,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	var dashLn net.Listener
 	var dashOpts dashboard.Options
+	var broker *approval.Broker
 	if cfg.Dashboard.Enabled {
 		ln, err := listenDashboard(cfg.DashboardAddr(), log)
 		if err != nil {
@@ -163,7 +165,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		} else {
 			dashLn = ln
 			hub := dashboard.NewHub()
-			broker := approval.NewBroker(cfg.Dashboard.ApprovalTimeout, hub.Notify)
+			broker = approval.NewBroker(cfg.Dashboard.ApprovalTimeout, hub.Notify)
 			feed := dashboard.NewFeed(200, hub.Notify)
 			gwOpts.Approver = broker
 			if gwOpts.Recorder != nil {
@@ -177,7 +179,32 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		log.Warn("policy rules need approval but the dashboard is off: those calls will be blocked", "hint", "dashboard: {enabled: true}")
 	}
 
-	gw := gateway.New(gwOpts)
+	// The metrics ask gw for its state once they're served, after it is set.
+	var gw *gateway.Gateway
+	var metricsLn net.Listener
+	var met *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		ln, err := net.Listen("tcp", cfg.MetricsAddr())
+		if err != nil {
+			// Unlike the dashboard's, a port picked at random would be no use
+			// to Prometheus, so go on without metrics.
+			log.Error("metrics couldn't start", "addr", cfg.MetricsAddr(), "err", err)
+		} else {
+			metricsLn = ln
+			mo := metrics.Options{
+				Version: version,
+				Held:    func() int { return len(gw.Held()) },
+				Tools:   func() int { return len(gw.Tools()) },
+			}
+			if broker != nil {
+				mo.Pending = func() int { return len(broker.Pending()) }
+			}
+			met = metrics.New(mo)
+			gwOpts.Observer = met
+		}
+	}
+
+	gw = gateway.New(gwOpts)
 	defer func() {
 		if err := gw.Close(); err != nil {
 			log.Debug("closing upstreams", "err", err)
@@ -203,6 +230,17 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		}
 		// The token stays out of the logs, which other programs may keep.
 		log.Info("dashboard", "url", withoutToken(u), "full_url_in", urlFile, "open_with", "portcullis dashboard --open")
+	}
+
+	if metricsLn != nil {
+		metricsCtx, stopMetrics := context.WithCancel(ctx)
+		defer stopMetrics()
+		go func() {
+			if err := met.Serve(metricsCtx, metricsLn, log); err != nil {
+				log.Error("metrics stopped", "err", err)
+			}
+		}()
+		log.Info("metrics", "url", "http://"+metricsLn.Addr().String()+"/metrics")
 	}
 
 	if err := connectAll(ctx, gw, cfg, names, opts); err != nil {

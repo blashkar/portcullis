@@ -58,8 +58,10 @@ type Options struct {
 	Version   string
 	SessionID string
 	Logger    *slog.Logger
-	Recorder  Recorder       // nil disables the audit log
-	Policy    *policy.Policy // nil allows every call
+	Recorder  Recorder // nil disables the audit log
+	// Observer, if set, is told about every event too, such as for metrics.
+	Observer Observer
+	Policy   *policy.Policy // nil allows every call
 	// Approver asks a person about calls the policy says need approval.
 	// Without one, those calls are blocked.
 	Approver Approver
@@ -375,6 +377,13 @@ func decodeArgs(raw json.RawMessage) (map[string]any, json.RawMessage, error) {
 	return celValue(args).(map[string]any), forward, nil
 }
 
+// PolicyArgs decodes a tool call's arguments as the gateway does before the
+// policy checks them, for checking recorded calls again.
+func PolicyArgs(raw json.RawMessage) (map[string]any, error) {
+	args, _, err := decodeArgs(raw)
+	return args, err
+}
+
 // celValue turns the json.Numbers in a decoded value into int64 or float64,
 // which CEL understands.
 func celValue(v any) any {
@@ -581,14 +590,14 @@ func (g *Gateway) upstreamExited(u *upstream, err error) {
 	g.server.RemoveResources(uris...)
 	if closing {
 		g.log.Info("upstream closed", "upstream", u.name)
-		g.record(context.Background(), audit.Event{Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/closed"})
+		g.record(context.Background(), audit.Event{Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/closed"}, Details{})
 		return
 	}
 	g.log.Warn("upstream disconnected", "upstream", u.name, "err", err, "tools_removed", len(tools))
 	g.record(context.Background(), audit.Event{
 		Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/disconnected",
 		Error: errString(err), IsError: true,
-	})
+	}, Details{})
 }
 
 // stale returns the names in old that aren't in current.
@@ -656,7 +665,7 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 			}
 			e.Findings = strings.Join(findings, "; ")
 			g.logEvent(e)
-			g.record(context.WithoutCancel(ctx), e)
+			g.record(context.WithoutCancel(ctx), e, note.details())
 			return res, err
 		}
 	}
@@ -715,11 +724,14 @@ func (g *Gateway) logEvent(e audit.Event) {
 	g.log.Info("message", attrs...)
 }
 
-func (g *Gateway) record(ctx context.Context, e audit.Event) {
+func (g *Gateway) record(ctx context.Context, e audit.Event, d Details) {
+	e.SessionID = g.opts.SessionID
+	if g.opts.Observer != nil {
+		g.opts.Observer.Observe(e, d)
+	}
 	if g.opts.Recorder == nil {
 		return
 	}
-	e.SessionID = g.opts.SessionID
 	if err := g.opts.Recorder.Record(ctx, e); err != nil {
 		g.log.Error("writing the audit log", "err", err)
 	}

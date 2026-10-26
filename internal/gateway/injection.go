@@ -127,7 +127,7 @@ func (g *Gateway) noteInjection(ctx context.Context, what string, v inject.Verdi
 		return
 	}
 	if n := noteFrom(ctx); n != nil {
-		n.injection = summary
+		n.injection, n.injected = summary, v.Injection
 	}
 	if v.Injection {
 		g.log.Warn("prompt injection in a result", "from", what, "action", string(g.opts.Inject.Action), "findings", summary)

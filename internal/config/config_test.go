@@ -254,3 +254,52 @@ func TestDashboardSettings(t *testing.T) {
 		t.Error("negative timeout: no error")
 	}
 }
+
+func TestMetricsSettings(t *testing.T) {
+	cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\n"), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Enabled || cfg.MetricsAddr() != DefaultMetricsAddr {
+		t.Errorf("defaults: %+v, %s", cfg.Metrics, cfg.MetricsAddr())
+	}
+	cfg, err = Parse([]byte("servers: {fs: {command: [x]}}\nmetrics: {enabled: true, addr: 'localhost:9100'}\n"), "/cfg")
+	if err != nil || !cfg.Metrics.Enabled || cfg.MetricsAddr() != "localhost:9100" {
+		t.Errorf("%+v, %v", cfg, err)
+	}
+	for _, bad := range []string{"0.0.0.0:9464", ":9464", "192.0.2.10:9464"} {
+		_, err := Parse([]byte("servers: {fs: {command: [x]}}\nmetrics: {addr: '"+bad+"'}\n"), "/cfg")
+		if err == nil || !strings.Contains(err.Error(), "metrics.addr") {
+			t.Errorf("addr %s: %v", bad, err)
+		}
+	}
+}
+
+func TestLoadPolicy(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// A file with only a policy, and no servers, is fine.
+	p, err := LoadPolicy(write("new.yaml", "policy:\n  rules:\n    - tool: git__*\n      action: deny\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := p.Check(policy.Call{Tool: "git__git_reset"}); d.Outcome() != "deny" {
+		t.Errorf("git__git_reset: %+v", d)
+	}
+	for name, body := range map[string]string{
+		"none.yaml":  "servers: {fs: {command: [x]}}\n",
+		"typo.yaml":  "polcy: {default: deny}\n",
+		"bad.yaml":   "policy: {default: maybe}\n",
+		"empty.yaml": "",
+	} {
+		if _, err := LoadPolicy(write(name, body)); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+}
