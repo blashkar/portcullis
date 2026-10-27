@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -184,12 +185,14 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 	return nil
 }
 
-// clean escapes control characters in text that came from a server or
+// clean replaces control characters in text that came from a server or
 // client, so it can't move the cursor, rewrite earlier lines or change a
-// terminal's settings with escape sequences when it's printed.
+// terminal's settings with escape sequences when it's printed. Invisible
+// format characters go too: a right-to-left override, say, can make text
+// read differently from what it is.
 func clean(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return '\uFFFD'
 		}
 		return r

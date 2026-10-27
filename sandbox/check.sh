@@ -5,7 +5,7 @@
 #
 #   sandbox/check.sh filesystem
 set -eu
-name=${1:?usage: check.sh <filesystem|git|everything>}
+name=${1:?usage: check.sh <filesystem|git|everything|evil>}
 dir=$(dirname "$0")
 
 # Keep the server's stdin open while we probe it.
@@ -28,6 +28,10 @@ check() { # check <description> <command that must succeed>
 # we want. Exit 1: it connected. Exit 2: no runtime to test with, so the check
 # fails rather than passing by accident.
 connect() {
+  if [ -n "$probe" ]; then
+    docker exec "$id" /probe connect "$1" "$2"
+    return
+  fi
   docker exec "$id" sh -c '
     if command -v node >/dev/null; then
       exec node -e "const s=require(\"net\").connect({host:process.argv[1],port:+process.argv[2],timeout:3000});
@@ -41,16 +45,32 @@ sys.exit(1)" "$1" "$2"
     exit 2' sh "$1" "$2"
 }
 
+# Images without a shell, like the demo server's, carry sandbox/probe to
+# check from inside instead.
+if docker exec "$id" sh -c true >/dev/null 2>&1; then probe=; else probe=/probe; fi
+
 check "no volumes or bind mounts" "[ \"\$(docker inspect -f '{{len .Mounts}}' $id)\" = 0 ]"
 check "network mode is none" "[ \"\$(docker inspect -f '{{.HostConfig.NetworkMode}}' $id)\" = none ]"
 check "not privileged" "[ \"\$(docker inspect -f '{{.HostConfig.Privileged}}' $id)\" = false ]"
-check "no Docker socket inside" "! docker exec $id test -e /var/run/docker.sock"
-check "no network interface up except loopback" "docker exec $id sh -c 'for i in /sys/class/net/*; do [ \$(basename \$i) = lo ] && continue; [ -f \$i/flags ] || continue; [ \$((\$(cat \$i/flags) & 1)) = 0 ] || exit 1; done'"
-check "runs as a non-root user" "[ \"\$(docker exec $id id -u)\" != 0 ]"
-check "no capabilities" "docker exec $id grep -q 'CapEff:[[:space:]]*0000000000000000' /proc/self/status"
-check "no privilege escalation" "docker exec $id grep -q 'NoNewPrivs:[[:space:]]*1' /proc/self/status"
-check "root filesystem is read-only" "! docker exec $id touch /should-fail"
-check "workspace is writable" "docker exec $id touch /workspace/ok"
+if [ -z "$probe" ]; then
+  check "no Docker socket inside" "! docker exec $id test -e /var/run/docker.sock"
+  check "no network interface up except loopback" "docker exec $id sh -c 'for i in /sys/class/net/*; do [ \$(basename \$i) = lo ] && continue; [ -f \$i/flags ] || continue; [ \$((\$(cat \$i/flags) & 1)) = 0 ] || exit 1; done'"
+  check "runs as a non-root user" "u=\$(docker exec $id id -u) && [ -n \"\$u\" ] && [ \"\$u\" != 0 ]"
+  check "no capabilities" "docker exec $id grep -q 'CapEff:[[:space:]]*0000000000000000' /proc/self/status"
+  check "no privilege escalation" "docker exec $id grep -q 'NoNewPrivs:[[:space:]]*1' /proc/self/status"
+  check "root filesystem is read-only" "! docker exec $id touch /should-fail"
+  check "workspace is writable" "docker exec $id touch /workspace/ok"
+else
+  # Checks expecting a failure must not pass because the probe is missing.
+  check "the probe runs" "docker exec $id /probe uid"
+  check "no Docker socket inside" "docker exec $id /probe absent /var/run/docker.sock"
+  check "no network interface up except loopback" "docker exec $id /probe ifaces"
+  check "runs as a non-root user" "u=\$(docker exec $id /probe uid) && [ -n \"\$u\" ] && [ \"\$u\" != 0 ]"
+  check "no capabilities" "docker exec $id /probe caps"
+  check "no privilege escalation" "docker exec $id /probe nonewprivs"
+  check "root filesystem is read-only" "! docker exec $id /probe touch /should-fail"
+  check "workspace is writable" "docker exec $id /probe touch /workspace/ok"
+fi
 # The host by name, the Docker Desktop host (macOS) and docker0 (Linux) by
 # address, and the internet.
 for target in "host.docker.internal 11434" "192.168.65.254 11434" "172.17.0.1 11434" "1.1.1.1 443"; do

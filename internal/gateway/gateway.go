@@ -91,6 +91,10 @@ type Gateway struct {
 	closing   bool // Close was called, so upstreams exiting is expected
 	// reported holds the tool reports already made, so each is made once.
 	reported map[string]bool
+	// inFlight counts, per upstream, the progress tokens of requests
+	// waiting on it; progress notifications for others are dropped.
+	inFlight     map[string]map[string]int
+	progressRate map[string]*rateWindow
 }
 
 type upstream struct {
@@ -118,6 +122,9 @@ func New(opts Options) *Gateway {
 		upstreams: map[string]*upstream{},
 		resources: map[string]string{},
 		reported:  map[string]bool{},
+
+		inFlight:     map[string]map[string]int{},
+		progressRate: map[string]*rateWindow{},
 	}
 	g.server = mcp.NewServer(&mcp.Implementation{Name: "portcullis", Version: opts.Version}, &mcp.ServerOptions{
 		Capabilities: &mcp.ServerCapabilities{
@@ -135,27 +142,29 @@ func New(opts Options) *Gateway {
 // is an *mcp.CommandTransport, and adds its tools, prompts and resources.
 func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) error {
 	u := &upstream{name: name, tools: map[string]bool{}, prompts: map[string]bool{}, resources: map[string]bool{}}
-	refresh := func(sync func(context.Context, *upstream) error) {
-		// Fetch the new list outside the notification handler, which runs on
-		// the session's read loop.
-		go func() {
-			if err := sync(context.Background(), u); err != nil {
+	// Each list is fetched again outside the notification handler, which
+	// runs on the session's read loop. A server can send notifications
+	// without end, so refreshes are coalesced and time-limited.
+	refresher := func(sync func(context.Context, *upstream) error) func() {
+		return coalesce(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+			defer cancel()
+			if err := sync(ctx, u); err != nil {
 				g.log.Warn("refreshing upstream lists", "upstream", name, "err", err)
 			}
-		}()
+		})
 	}
+	refreshTools, refreshPrompts, refreshResources := refresher(g.syncTools), refresher(g.syncPrompts), refresher(g.syncResources)
 	client := mcp.NewClient(&mcp.Implementation{Name: "portcullis", Version: g.opts.Version}, &mcp.ClientOptions{
 		// No roots: portcullis doesn't expose the client's filesystem to upstreams.
 		Capabilities:               &mcp.ClientCapabilities{},
-		ToolListChangedHandler:     func(context.Context, *mcp.ToolListChangedRequest) { refresh(g.syncTools) },
-		PromptListChangedHandler:   func(context.Context, *mcp.PromptListChangedRequest) { refresh(g.syncPrompts) },
-		ResourceListChangedHandler: func(context.Context, *mcp.ResourceListChangedRequest) { refresh(g.syncResources) },
+		ToolListChangedHandler:     func(context.Context, *mcp.ToolListChangedRequest) { refreshTools() },
+		PromptListChangedHandler:   func(context.Context, *mcp.PromptListChangedRequest) { refreshPrompts() },
+		ResourceListChangedHandler: func(context.Context, *mcp.ResourceListChangedRequest) { refreshResources() },
 		ProgressNotificationHandler: func(ctx context.Context, r *mcp.ProgressNotificationClientRequest) {
 			// Progress tokens are chosen by the client and passed through
-			// unchanged, so the notification can go back as it is.
-			if ss := g.clientSession(); ss != nil {
-				_ = ss.NotifyProgress(ctx, r.Params)
-			}
+			// unchanged, so the notification can go back with the same one.
+			g.progress(ctx, name, r.Params)
 		},
 	})
 	session, err := client.Connect(ctx, t, nil)
@@ -271,12 +280,12 @@ func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
 		return nil // it exited; upstreamExited cleans up
 	}
 
-	var tools []*mcp.Tool
-	for t, err := range s.Tools(ctx, nil) {
-		if err != nil {
-			return err
-		}
-		tools = append(tools, t)
+	tools, full, err := collect(s.Tools(ctx, nil))
+	if err != nil {
+		return err
+	}
+	if !full {
+		g.tooLong(u.name, "tools")
 	}
 
 	offered := map[string]*mcp.Tool{}
@@ -338,6 +347,7 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 		if err != nil {
 			return nil, err
 		}
+		defer g.expectProgress(upstream, req.Params.GetProgressToken())()
 		res, err := s.CallTool(ctx, &mcp.CallToolParams{
 			Meta:           req.Params.Meta,
 			Name:           tool,
@@ -462,12 +472,12 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 		return nil // it exited; upstreamExited cleans up
 	}
 
-	var prompts []*mcp.Prompt
-	for p, err := range s.Prompts(ctx, nil) {
-		if err != nil {
-			return err
-		}
-		prompts = append(prompts, p)
+	prompts, full, err := collect(s.Prompts(ctx, nil))
+	if err != nil {
+		return err
+	}
+	if !full {
+		g.tooLong(u.name, "prompts")
 	}
 	seen := map[string]bool{}
 	for _, p := range prompts {
@@ -480,6 +490,7 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 			if err != nil {
 				return nil, err
 			}
+			defer g.expectProgress(u.name, req.Params.GetProgressToken())()
 			res, err := s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
 			g.redactPrompt(ctx, res)
 			return res, err
@@ -504,12 +515,12 @@ func (g *Gateway) syncResources(ctx context.Context, u *upstream) error {
 		return nil // it exited; upstreamExited cleans up
 	}
 
-	var resources []*mcp.Resource
-	for r, err := range s.Resources(ctx, nil) {
-		if err != nil {
-			return err
-		}
-		resources = append(resources, r)
+	resources, full, err := collect(s.Resources(ctx, nil))
+	if err != nil {
+		return err
+	}
+	if !full {
+		g.tooLong(u.name, "resources")
 	}
 	seen := map[string]bool{}
 	for _, r := range resources {
@@ -547,6 +558,7 @@ func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
 		if err != nil {
 			return nil, err
 		}
+		defer g.expectProgress(upstream, req.Params.GetProgressToken())()
 		res, err := s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
 		g.redactResource(ctx, res)
 		if err == nil {

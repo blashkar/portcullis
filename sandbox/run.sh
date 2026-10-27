@@ -12,15 +12,18 @@
 # the container running after portcullis gives up on it.
 set -eu
 
-name=${1:?usage: run.sh <filesystem|git|everything>}
-# The non-root user each image runs as: node (1000) or app (999).
+name=${1:?usage: run.sh <filesystem|git|everything|evil>}
+# The non-root user each image runs as: node (1000), app (999), or for the
+# demo server's empty image, a bare number.
 case $name in
   filesystem | everything) uid=1000 ;;
   git) uid=999 ;;
+  evil) uid=65532 ;;
   *) echo "run.sh: unknown server $name" >&2; exit 2 ;;
 esac
 
-exec docker run -i --rm --init \
+# --pull never: only an image built here runs, never one fetched by name.
+exec docker run -i --rm --init --pull never \
   --network none \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \

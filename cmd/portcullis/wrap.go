@@ -64,7 +64,8 @@ func runWrap(ctx context.Context, opts wrapOptions, args []string) error {
 	// Cancelling serverCtx sends the server SIGTERM, then SIGKILL after the grace period.
 	serverCtx, stopServer := context.WithCancel(ctx)
 	defer stopServer()
-	server, err := transport.StartProcess(serverCtx, args[0], args[1:], os.Stderr, opts.grace)
+	// The server's stderr is checked as serve checks it, with no prefix.
+	server, err := transport.StartProcess(serverCtx, args[0], args[1:], &prefixWriter{w: os.Stderr}, opts.grace)
 	if err != nil {
 		return err
 	}

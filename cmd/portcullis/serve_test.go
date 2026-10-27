@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -374,8 +376,52 @@ func TestPrefixWriter(t *testing.T) {
 	}
 }
 
+// A server's stderr can't rewrite the terminal, use unbounded memory with
+// a line that never ends, or fill the disk.
+func TestPrefixWriterUntrusted(t *testing.T) {
+	var b strings.Builder
+	w := &prefixWriter{w: &b, prefix: "[evil] "}
+	fmt.Fprint(w, "hi\x1b]0;pwned\x07\x1b[2J\n")
+	if got := b.String(); got != "[evil] hi\uFFFD]0;pwned\uFFFD\uFFFD[2J\n" {
+		t.Errorf("escapes: %q", got)
+	}
+
+	b.Reset()
+	fmt.Fprint(w, strings.Repeat("x", 3*maxStderrLine+5))
+	if len(w.buf) != 5 {
+		t.Errorf("%d bytes held", len(w.buf))
+	}
+	if lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n"); len(lines) != 3 || len(lines[0]) != len("[evil] ")+maxStderrLine {
+		t.Errorf("%d lines, first %d bytes", len(lines), len(lines[0]))
+	}
+	// A long line is cut even when its end comes in the same write.
+	b.Reset()
+	w = &prefixWriter{w: &b, prefix: "[evil] "}
+	fmt.Fprint(w, strings.Repeat("z", maxStderrLine+10)+"\n")
+	if lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n"); len(lines) != 2 || len(lines[1]) != len("[evil] ")+10 {
+		t.Errorf("long line with its end: %d lines", len(lines))
+	}
+
+	b.Reset()
+	w = &prefixWriter{w: &b, prefix: "[evil] "}
+	line := strings.Repeat("y", 1000) + "\n"
+	for range 1000 { // about 1 MB at once
+		fmt.Fprint(w, line)
+	}
+	if n := b.Len(); n > maxStderrRate+2*len(line)+200 {
+		t.Errorf("%d bytes written in a second", n)
+	}
+	if !strings.Contains(b.String(), "dropping this server's stderr") || strings.Count(b.String(), "dropping") != 1 {
+		t.Error("no single notice about dropping")
+	}
+}
+
 func TestClean(t *testing.T) {
 	if got := clean("ok\x1b[2J\x1b]0;pwned\x07 tab\there é"); got != "ok�[2J�]0;pwned� tab�here é" {
+		t.Errorf("clean = %q", got)
+	}
+	// A right-to-left override would make "evil__gpj.exe" read as "evil__exe.jpg".
+	if got := clean("evil__" + string(rune(0x202E)) + "gpj.exe"); got != "evil__\uFFFDgpj.exe" {
 		t.Errorf("clean = %q", got)
 	}
 }
@@ -415,4 +461,39 @@ func TestIsLoopback(t *testing.T) {
 			t.Errorf("isLoopback(%s) = %v", u, got)
 		}
 	}
+}
+
+func FuzzPrefixWriter(f *testing.F) {
+	f.Add([]byte("one\ntwo\n"), uint16(3))
+	f.Add([]byte("a\x1b[2J\tb\r\n"), uint16(1))
+	f.Add(bytes.Repeat([]byte("x"), maxStderrLine+3), uint16(100))
+	f.Fuzz(func(t *testing.T, data []byte, chunk uint16) {
+		var b strings.Builder
+		w := &prefixWriter{w: &b, prefix: "[p] "}
+		n := int(chunk)%4096 + 1
+		for len(data) > 0 {
+			k := min(n, len(data))
+			if _, err := w.Write(data[:k]); err != nil {
+				t.Fatal(err)
+			}
+			data = data[k:]
+			if len(w.buf) > maxStderrLine {
+				t.Fatalf("holding %d bytes", len(w.buf))
+			}
+		}
+		for line := range strings.Lines(b.String()) {
+			body, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "[p] ")
+			if !ok {
+				t.Fatalf("line without the prefix: %q", line)
+			}
+			if body != "(portcullis: dropping this server's stderr over 64 KiB a second)" && len(body) > maxStderrLine*3 {
+				t.Fatalf("line of %d bytes", len(body)) // U+FFFD can triple a byte
+			}
+			for _, r := range body {
+				if r != '\t' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+					t.Fatalf("control character %U in %q", r, body)
+				}
+			}
+		}
+	})
 }

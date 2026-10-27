@@ -17,6 +17,7 @@ fuzz:
 	go test -run '^$$' -fuzz FuzzTool -fuzztime 30s ./internal/scan
 	go test -run '^$$' -fuzz FuzzRedact -fuzztime 30s ./internal/redact
 	go test -run '^$$' -fuzz FuzzHeuristics -fuzztime 30s ./internal/inject
+	go test -run '^$$' -fuzz FuzzPrefixWriter -fuzztime 30s ./cmd/portcullis
 
 lint:
 	golangci-lint run
@@ -39,11 +40,28 @@ UPSTREAM_REF := ef9808f71090d0db3eda99e2af2ba78f1086f4fb
 UPSTREAM := https://github.com/modelcontextprotocol/servers.git\#$(UPSTREAM_REF)
 SANDBOX_SERVERS := filesystem git everything
 
-.PHONY: sandbox
-sandbox:
+.PHONY: sandbox sandbox-evil demo
+sandbox: sandbox-evil
 	docker build -t portcullis-upstream/filesystem -f src/filesystem/Dockerfile "$(UPSTREAM)"
 	docker build -t portcullis-upstream/everything -f src/everything/Dockerfile "$(UPSTREAM)"
 	docker build -t portcullis-upstream/git "$(UPSTREAM):src/git"
 	for s in $(SANDBOX_SERVERS); do \
 		docker build -t portcullis-sandbox/$$s --build-arg BASE=portcullis-upstream/$$s - < sandbox/$$s.Dockerfile || exit 1; \
 	done
+
+# The deliberately malicious demo server. It's our own code, so it's
+# cross-compiled here for the Docker engine's architecture and put on an
+# empty base image: nothing is pulled, and the build context holds only the
+# two static binaries.
+sandbox-evil:
+	ctx=$$(mktemp -d) && trap 'rm -rf "$$ctx"' EXIT && \
+	arch=$$(docker version -f '{{.Server.Arch}}') && \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o "$$ctx/evil-server" ./demo/evil-server && \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o "$$ctx/probe" ./sandbox/probe && \
+	docker build -t portcullis-sandbox/evil -f sandbox/evil.Dockerfile "$$ctx"
+
+# The demo: portcullis, run here, in front of the malicious server in the
+# sandbox, driven by a scripted client. Each run starts with fresh state.
+demo: build sandbox-evil
+	rm -f demo/demo.db demo/demo.db-shm demo/demo.db-wal demo/demo.pins.json demo/demo.pins.json.lock
+	go run ./demo/client
