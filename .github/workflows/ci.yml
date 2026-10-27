@@ -24,11 +24,14 @@ jobs:
           version: v2.15.0
       - run: make vuln
 
-  # Builds the sandboxed MCP servers and checks from inside each container
-  # that it can't reach the host.
+  # Builds the sandboxed MCP servers, the demo's malicious one included, and
+  # checks from inside each container that it can't reach the host.
   sandbox:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
       - run: make sandbox
-      - run: for s in filesystem git everything; do sandbox/check.sh "$s" || exit 1; done
+      - run: for s in filesystem git everything evil; do sandbox/check.sh "$s" || exit 1; done
