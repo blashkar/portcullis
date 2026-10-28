@@ -76,7 +76,7 @@ func (f *Feed) Observe(e audit.Event, d gateway.Details) {
 	var ev Event
 	keep := shown(e)
 	if keep {
-		ev = f.readable(e)
+		ev = readable(f.redactor, e)
 		ev.Details = d
 	}
 	f.mu.Lock()
@@ -102,8 +102,9 @@ const redactWindow = 64 << 10
 const summaryLen = 120
 
 // readable makes e's payloads readable and drops the raw ones. What the
-// client sent is redacted: unlike results, the gateway doesn't redact it.
-func (f *Feed) readable(e audit.Event) Event {
+// client sent is redacted with r, if it isn't nil: unlike results, the
+// gateway doesn't redact it.
+func readable(r *redact.Redactor, e audit.Event) Event {
 	params, result := e.Params, e.Result
 	e.Params, e.Result = "", ""
 	ev := Event{Event: e}
@@ -114,8 +115,8 @@ func (f *Feed) readable(e audit.Event) Event {
 	switch {
 	case parsed && key != "":
 		if in = field(in, key); in != nil {
-			if f.redactor != nil {
-				in = f.redactor.Value(in, redact.Counts{})
+			if r != nil {
+				in = r.Value(in, redact.Counts{})
 			}
 			ev.Input = shorten(indent(in), maxShownPayload)
 			ev.Summary = shorten(oneLine(in), summaryLen)
@@ -125,8 +126,8 @@ func (f *Feed) readable(e audit.Event) Event {
 		ev.Input = shorten(indent(in), maxShownPayload)
 	case params != "":
 		p := shorten(params, redactWindow)
-		if f.redactor != nil {
-			p, _ = f.redactor.String(p)
+		if r != nil {
+			p, _ = r.String(p)
 		}
 		ev.Input = shorten(p, maxShownPayload)
 	}

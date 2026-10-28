@@ -29,6 +29,10 @@ const maxShownPayload = 4 << 10
 const shownEvents = 100
 
 type pageView struct {
+	Page      string // pageLive, pageSecurity, ...
+	Title     string
+	Partial   string // where the script fetches this page's main section
+	Tabs      []tabView
 	Version   string
 	SessionID string
 	Approvals bool // approvals are on
@@ -45,6 +49,15 @@ type pageView struct {
 	Detail   *detailView
 	Gone     bool   // the selected event is no longer kept
 	Unselect string // the link that clears the selection
+
+	Cards []cardView // security events
+
+	Servers []serverView
+
+	HasAudit bool
+	AuditErr bool
+	Sessions []sessionView
+	Picked   *sessionView // the past session shown
 }
 
 // tileView is one of the overview's numbers.
@@ -83,8 +96,12 @@ type diffLine struct {
 	Class, Text string
 }
 
-func (s *Server) view(r *http.Request) pageView {
-	v := pageView{Version: s.o.Version, SessionID: s.o.SessionID, Approvals: s.o.Approvals != nil}
+func (s *Server) view(r *http.Request, page string) pageView {
+	v := pageView{Page: page, Title: pageTitle(page), Version: s.o.Version, SessionID: s.o.SessionID, Approvals: s.o.Approvals != nil}
+	v.Partial = "main"
+	if page != pageLive {
+		v.Partial = page + "-main"
+	}
 	if s.o.Approvals != nil {
 		for _, r := range s.o.Approvals.Pending() {
 			args := prettyJSON(r.Args)
@@ -100,30 +117,42 @@ func (s *Server) view(r *http.Request) pageView {
 			v.Pending = append(v.Pending, p)
 		}
 	}
-	v.Held = s.heldView()
+	var events []Event
+	if s.o.Feed != nil {
+		events = s.o.Feed.Events()
+		if len(events) > shownEvents {
+			events = events[:shownEvents]
+		}
+	}
+	switch page {
+	case pageSecurity:
+		s.securityView(&v, events)
+	case pageServers:
+		s.serversView(&v)
+	case pageSessions:
+		s.sessionsView(r, &v)
+	default:
+		v.Held = s.heldView()
+		s.liveView(r, &v, events)
+	}
+	v.Tabs = s.tabs(&v, caughtEvents(events))
+	return v
+}
+
+func (s *Server) liveView(r *http.Request, v *pageView, events []Event) {
 	if s.o.Feed == nil {
-		return v
+		return
 	}
 	v.Live = true
 	q := r.URL.Query()
-	v.Show = parseShow(q.Get("show"))
-	selected := parseEvent(q.Get("event"))
-	v.Unselect = link(v.Show, 0)
-	events := s.o.Feed.Events()
-	if len(events) > shownEvents {
-		events = events[:shownEvents]
-	}
+	n := nav{base: "./", show: parseShow(q.Get("show")), event: parseEvent(q.Get("event"))}
+	v.Show = n.show
+	v.Unselect = n.link(n.show, 0)
 	var found bool
-	v.Rows, v.Detail, found = timeline(events, v.Show, selected)
-	v.Gone = selected > 0 && !found
-	t := s.o.Feed.Totals()
-	v.Tiles, v.Bar, v.BarWidth = overview(t, len(v.Pending), len(v.Held))
-	for _, f := range []struct{ show, label string }{
-		{showAll, "All"}, {showCaught, "Caught by portcullis"}, {showThrough, "Went through"},
-	} {
-		v.Filters = append(v.Filters, filterView{Label: f.label, Href: link(f.show, selected), On: f.show == v.Show})
-	}
-	return v
+	v.Rows, v.Detail, found = timeline(events, n)
+	v.Gone = n.event > 0 && !found
+	v.Tiles, v.Bar, v.BarWidth = overview(s.o.Feed.Totals(), len(v.Pending), len(v.Held))
+	v.Filters = filters(n)
 }
 
 // overview builds the numbers at the top of the page.

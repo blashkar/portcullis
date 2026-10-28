@@ -238,6 +238,29 @@ func (g *Gateway) Tools() []string {
 	return names
 }
 
+// ServerInfo is what the gateway knows about one upstream server.
+type ServerInfo struct {
+	Name      string
+	Connected bool
+	Tools     []string          // client-facing names of the tools offered, sorted
+	Held      map[string]string // tools held back, with the reason
+}
+
+// Servers describes the upstream servers, sorted by name.
+func (g *Gateway) Servers() []ServerInfo {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []ServerInfo
+	for _, name := range slices.Sorted(maps.Keys(g.upstreams)) {
+		u := g.upstreams[name]
+		out = append(out, ServerInfo{
+			Name: name, Connected: u.session != nil,
+			Tools: slices.Sorted(maps.Keys(u.tools)), Held: maps.Clone(u.held),
+		})
+	}
+	return out
+}
+
 // session returns the upstream's session, or an error if it has exited.
 func (g *Gateway) session(name string) (*mcp.ClientSession, error) {
 	g.mu.Lock()

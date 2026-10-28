@@ -1,5 +1,6 @@
 // Package dashboard serves portcullis's local web dashboard: calls waiting
-// for approval, tools held back, and live activity.
+// for approval, a live timeline of the session, what portcullis caught,
+// the servers and their tools, and past sessions.
 //
 // It can approve tool calls, so it is locked down:
 //
@@ -34,7 +35,10 @@ import (
 	"time"
 
 	"github.com/blashkar/portcullis/internal/approval"
+	"github.com/blashkar/portcullis/internal/gateway"
 	"github.com/blashkar/portcullis/internal/pin"
+	"github.com/blashkar/portcullis/internal/policy"
+	"github.com/blashkar/portcullis/internal/redact"
 )
 
 //go:embed assets
@@ -49,6 +53,16 @@ type Options struct {
 	Held func() map[string]string
 	// Pins, if not nil, lets held tools be approved from the dashboard.
 	Pins *pin.Store
+	// Servers, if not nil, describes the upstream servers, and Commands are
+	// their commands as the config gives them.
+	Servers  func() []gateway.ServerInfo
+	Commands map[string][]string
+	// Policy, if not nil, shows which rules apply to each tool.
+	Policy *policy.Policy
+	// Audit, if not nil, lists past sessions; Redactor redacts what
+	// clients sent in them before it's shown.
+	Audit    AuditLog
+	Redactor *redact.Redactor
 
 	Version   string
 	SessionID string
@@ -150,8 +164,12 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /{token}", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/"+s.token+"/", http.StatusSeeOther)
 	}))
-	mux.HandleFunc("GET /{token}/{$}", s.guard(s.page))
-	mux.HandleFunc("GET /{token}/main", s.guard(s.main))
+	mux.HandleFunc("GET /{token}/{$}", s.guard(s.page(pageLive)))
+	mux.HandleFunc("GET /{token}/main", s.guard(s.part(pageLive)))
+	for _, p := range []string{pageSecurity, pageServers, pageSessions} {
+		mux.HandleFunc("GET /{token}/"+p, s.guard(s.page(p)))
+		mux.HandleFunc("GET /{token}/"+p+"-main", s.guard(s.part(p)))
+	}
 	mux.HandleFunc("GET /{token}/events", s.guard(s.events))
 	mux.HandleFunc("GET /{token}/static/{file}", s.guard(func(w http.ResponseWriter, r *http.Request) {
 		switch r.PathValue("file") {
@@ -220,12 +238,18 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) page(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "page", s.view(r))
+// page serves a whole page, and part serves its main section, which the
+// script fetches to refresh it.
+func (s *Server) page(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.render(w, "page", s.view(r, name))
+	}
 }
 
-func (s *Server) main(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "main", s.view(r))
+func (s *Server) part(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.render(w, "main", s.view(r, name))
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, v pageView) {

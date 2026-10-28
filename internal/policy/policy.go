@@ -319,6 +319,36 @@ func (r *rule) matchesTool(tool string) bool {
 	return r.tools.Match(tool)
 }
 
+// RuleInfo describes a rule, for showing which rules apply to a tool.
+type RuleInfo struct {
+	Name        string
+	Action      Action // "" for a rule that only limits the rate
+	RateLimit   string // such as "120/min"
+	Conditional bool   // it has a when condition, so it may not apply
+	LogOnly     bool   // only recorded, not enforced
+}
+
+// RulesFor returns the rules whose tool patterns match tool, in the order
+// they're checked, and the action a call gets when none of them decides.
+// A policy whose every rule is log_only reports them all as log_only.
+func (p *Policy) RulesFor(tool string) ([]RuleInfo, Action) {
+	if p == nil {
+		return nil, Allow
+	}
+	var out []RuleInfo
+	for _, r := range p.rules {
+		if !r.matchesTool(tool) {
+			continue
+		}
+		info := RuleInfo{Name: r.name, Action: r.action, Conditional: r.when != nil, LogOnly: r.logOnly || p.logOnly}
+		if r.limit != nil {
+			info.RateLimit = r.limit.String()
+		}
+		out = append(out, info)
+	}
+	return out, p.def
+}
+
 // NeedsApproval reports whether any enforced rule asks for a person's
 // approval.
 func (p *Policy) NeedsApproval() bool {

@@ -123,6 +123,31 @@ policy:
 		t.Error("an approved call is listed as caught")
 	}
 
+	// The other pages read the running gateway and the audit log.
+	get := func(path string) string {
+		t.Helper()
+		res, err := http.Get(dashURL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return string(b)
+	}
+	servers := get("servers-main")
+	for _, want := range []string{`<span class="tool big">alpha</span>`, `<span class="tool big">beta</span>`, "alpha__whoami", "needs approval", "not sandboxed"} {
+		if !strings.Contains(servers, want) {
+			t.Errorf("servers page lacks %q", want)
+		}
+	}
+	sessions := get("sessions-main")
+	if !strings.Contains(sessions, "this one") || !strings.Contains(sessions, "e2e-client") {
+		t.Errorf("sessions page:\n%s", sessions)
+	}
+	if security := get("security-main"); !strings.Contains(security, "Denied by you") {
+		t.Error("security page lacks the denial")
+	}
+
 	_ = cs.Close()
 	_ = cmd.Wait()
 	token := strings.TrimSuffix(dashURL[strings.LastIndex(strings.TrimSuffix(dashURL, "/"), "/")+1:], "/")

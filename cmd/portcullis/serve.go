@@ -129,6 +129,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 			gwOpts.Inject.Detector.Guard = guard
 		}
 	}
+	var auditLog dashboard.AuditLog // for the dashboard's past sessions
 	if path := cfg.AuditPath(); path != "" {
 		store, err := audit.Open(path, cfg.MaxPayload())
 		if err != nil {
@@ -145,6 +146,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 			}
 		}()
 		gwOpts.Recorder = store
+		auditLog = store
 		gwOpts.OnClientInfo = func(name, ver string) {
 			log.Info("client identified", "client", name, "client_version", ver)
 			if err := store.SetClient(context.WithoutCancel(ctx), sessionID, strings.TrimSpace(name+" "+ver)); err != nil {
@@ -213,6 +215,13 @@ func runServe(ctx context.Context, opts serveOptions) error {
 
 	if dashLn != nil {
 		dashOpts.Held = gw.Held
+		dashOpts.Servers = gw.Servers
+		dashOpts.Policy, dashOpts.Audit, dashOpts.Redactor = pol, auditLog, redactor
+		// As the config gives them, without the paths they're resolved to.
+		dashOpts.Commands = map[string][]string{}
+		for name, sv := range cfg.Servers {
+			dashOpts.Commands[name] = sv.Command
+		}
 		d := dashboard.New(dashOpts)
 		dashCtx, stopDash := context.WithCancel(ctx)
 		defer stopDash()

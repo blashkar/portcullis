@@ -94,6 +94,9 @@ func TestRugPullIsHeldUntilApproved(t *testing.T) {
 	if held := h.gw.Held(); !strings.Contains(held["m__add"], "changed") {
 		t.Errorf("Held = %v", held)
 	}
+	if sv := h.gw.Servers(); len(sv) != 1 || sv[0].Name != "m" || !sv[0].Connected || len(sv[0].Tools) != 0 || !strings.Contains(sv[0].Held["m__add"], "changed") {
+		t.Errorf("Servers = %+v", sv)
+	}
 
 	// A person reviews and approves it from another process.
 	if _, err := pin.Open(pins, false).Approve([]string{"m__add"}); err != nil {

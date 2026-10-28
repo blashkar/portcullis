@@ -15,8 +15,9 @@ async function refresh() {
   }
   busy = true;
   try {
-    // The query holds the timeline's filter and selected event.
-    const res = await fetch("main" + location.search, { cache: "no-store" });
+    // Each page has its own main section. The query holds the timeline's
+    // filter and selected event, and the session shown.
+    const res = await fetch(main.dataset.partial + location.search, { cache: "no-store" });
     if (res.ok) {
       // Keep open sections open across the refresh.
       const open = [...main.querySelectorAll("details[open]")].map((d) => d.id).filter(Boolean);
@@ -41,7 +42,8 @@ async function refresh() {
 function showPending() {
   const section = main.querySelector("[data-pending]");
   const n = section ? Number(section.dataset.pending) : 0;
-  document.title = n > 0 ? `(${n}) waiting · portcullis` : "portcullis";
+  const title = `${main.dataset.title} · portcullis`;
+  document.title = n > 0 ? `(${n}) waiting · ${title}` : title;
 }
 
 // Choosing a filter or a row changes the address and fetches the main

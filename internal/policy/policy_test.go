@@ -363,3 +363,36 @@ rules:
 		t.Errorf("%d calls allowed, want 50", allowed.Load())
 	}
 }
+
+func TestRulesFor(t *testing.T) {
+	p, err := Compile(Spec{Default: Deny, Rules: []RuleSpec{
+		{Name: "budget", RateLimit: "10/min"},
+		{Name: "fs-reads", Tool: Patterns{"fs__read_*"}, Action: Allow, When: `args.path.startsWith("/workspace")`},
+		{Name: "trial", Tool: Patterns{"fs__*"}, Action: Deny, LogOnly: true},
+		{Name: "git", Tool: Patterns{"git__*"}, Action: RequireApproval},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, def := p.RulesFor("fs__read_file")
+	want := []RuleInfo{
+		{Name: "budget", RateLimit: "10/min"},
+		{Name: "fs-reads", Action: Allow, Conditional: true},
+		{Name: "trial", Action: Deny, LogOnly: true},
+	}
+	if def != Deny || len(rules) != len(want) {
+		t.Fatalf("rules = %+v, default %s", rules, def)
+	}
+	for i := range want {
+		if rules[i] != want[i] {
+			t.Errorf("rule %d = %+v, want %+v", i, rules[i], want[i])
+		}
+	}
+	if rules, _ := p.RulesFor("git__git_log"); len(rules) != 2 || rules[1].Action != RequireApproval {
+		t.Errorf("git rules = %+v", rules)
+	}
+	var none *Policy
+	if rules, def := none.RulesFor("x"); rules != nil || def != Allow {
+		t.Error("no policy")
+	}
+}
