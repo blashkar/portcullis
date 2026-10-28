@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,15 +19,13 @@ import (
 	"github.com/blashkar/portcullis/internal/gateway"
 )
 
-// recorders sends each audit event to several recorders.
-type recorders []gateway.Recorder
+// observers tells several observers about each event.
+type observers []gateway.Observer
 
-func (rs recorders) Record(ctx context.Context, e audit.Event) error {
-	var errs []error
-	for _, r := range rs {
-		errs = append(errs, r.Record(ctx, e))
+func (os observers) Observe(e audit.Event, d gateway.Details) {
+	for _, o := range os {
+		o.Observe(e, d)
 	}
-	return errors.Join(errs...)
 }
 
 // listenDashboard opens the dashboard's listener. If the configured port is

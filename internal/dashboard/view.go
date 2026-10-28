@@ -7,13 +7,14 @@ import (
 	"html"
 	"html/template"
 	"maps"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/pin"
 )
 
@@ -24,8 +25,8 @@ const maxShownArgs = 32 << 10
 // maxShownPayload caps each params or result shown in the activity list.
 const maxShownPayload = 4 << 10
 
-// shownEvents is how many recent events the activity list shows.
-const shownEvents = 50
+// shownEvents is how many recent events the timeline shows.
+const shownEvents = 100
 
 type pageView struct {
 	Version   string
@@ -33,7 +34,34 @@ type pageView struct {
 	Approvals bool // approvals are on
 	Pending   []pendingView
 	Held      []heldView
-	Events    []eventView
+
+	Live     bool // the gateway reports events; false in tests of other parts
+	Tiles    []tileView
+	Bar      []barPart
+	BarWidth int // the bar's viewBox width
+	Show     string
+	Filters  []filterView
+	Rows     []rowView
+	Detail   *detailView
+	Gone     bool   // the selected event is no longer kept
+	Unselect string // the link that clears the selection
+}
+
+// tileView is one of the overview's numbers.
+type tileView struct {
+	Label, Value, Note, Tone string
+}
+
+// barPart is one part of the bar that splits the tool calls by decision,
+// drawn in a viewBox 1000 wide.
+type barPart struct {
+	Label, Tone string
+	N, X, W     int
+}
+
+type filterView struct {
+	Label, Href string
+	On          bool
 }
 
 type pendingView struct {
@@ -55,17 +83,7 @@ type diffLine struct {
 	Class, Text string
 }
 
-type eventView struct {
-	ID                               string
-	Time, Dir, Method, Tool, Server  string
-	Decision, Rule, Reason, Findings string
-	Error                            string
-	Failed                           bool
-	Params, Result                   string
-	Duration                         string
-}
-
-func (s *Server) view() pageView {
+func (s *Server) view(r *http.Request) pageView {
 	v := pageView{Version: s.o.Version, SessionID: s.o.SessionID, Approvals: s.o.Approvals != nil}
 	if s.o.Approvals != nil {
 		for _, r := range s.o.Approvals.Pending() {
@@ -83,15 +101,96 @@ func (s *Server) view() pageView {
 		}
 	}
 	v.Held = s.heldView()
-	if s.o.Feed != nil {
-		for i, e := range s.o.Feed.Events() {
-			if i == shownEvents {
-				break
-			}
-			v.Events = append(v.Events, eventFrom(e))
-		}
+	if s.o.Feed == nil {
+		return v
+	}
+	v.Live = true
+	q := r.URL.Query()
+	v.Show = parseShow(q.Get("show"))
+	selected := parseEvent(q.Get("event"))
+	v.Unselect = link(v.Show, 0)
+	events := s.o.Feed.Events()
+	if len(events) > shownEvents {
+		events = events[:shownEvents]
+	}
+	var found bool
+	v.Rows, v.Detail, found = timeline(events, v.Show, selected)
+	v.Gone = selected > 0 && !found
+	t := s.o.Feed.Totals()
+	v.Tiles, v.Bar, v.BarWidth = overview(t, len(v.Pending), len(v.Held))
+	for _, f := range []struct{ show, label string }{
+		{showAll, "All"}, {showCaught, "Caught by portcullis"}, {showThrough, "Went through"},
+	} {
+		v.Filters = append(v.Filters, filterView{Label: f.label, Href: link(f.show, selected), On: f.show == v.Show})
 	}
 	return v
+}
+
+// overview builds the numbers at the top of the page.
+func overview(t Totals, waiting, held int) ([]tileView, []barPart, int) {
+	note := func(parts ...string) string {
+		var out []string
+		for _, p := range parts {
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return strings.Join(out, ", ")
+	}
+	some := func(n int, what string) string {
+		if n == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d %s", n, what)
+	}
+	blockedTone, heldTone, secretTone, injTone := toneMute, toneMute, toneMute, toneMute
+	if t.Blocked() > 0 {
+		blockedTone = toneBad
+	}
+	if held > 0 {
+		heldTone = toneBad
+	}
+	if t.Redacted > 0 {
+		secretTone = toneWarn
+	}
+	if t.Injections > 0 {
+		injTone = toneWarn
+	}
+	tiles := []tileView{
+		{Label: "Tool calls", Value: strconv.Itoa(t.Calls), Note: note(some(t.Allowed, "allowed")), Tone: toneMute},
+		{
+			Label: "Blocked", Value: strconv.Itoa(t.Blocked()), Tone: blockedTone,
+			Note: note(some(t.Denied, "by policy"), some(t.RateLimited, "rate limited"), some(t.Held, "held tool"), some(t.NotApproved, "not approved")),
+		},
+		{Label: "Approved by you", Value: strconv.Itoa(t.Approved), Tone: toneInfo, Note: fmt.Sprintf("%d waiting now", waiting)},
+		{Label: "Secrets redacted", Value: strconv.Itoa(t.Redacted), Tone: secretTone},
+		{Label: "Injections flagged", Value: strconv.Itoa(t.Injections), Tone: injTone, Note: some(t.Withheld, "withheld")},
+		{Label: "Tools held back", Value: strconv.Itoa(held), Tone: heldTone, Note: "right now"},
+	}
+	parts := []barPart{
+		{Label: "allowed", Tone: toneOK, N: t.Allowed},
+		{Label: "approved by you", Tone: toneInfo, N: t.Approved},
+		{Label: "denied by policy", Tone: toneBad, N: t.Denied + t.RateLimited},
+		{Label: "not approved", Tone: toneMute, N: t.NotApproved},
+		{Label: "held tool", Tone: toneWarn, N: t.Held},
+	}
+	// Each part is at least a sliver wide, and a gap separates them, so
+	// the viewBox is as wide as they add up to.
+	const gap = 6
+	var bar []barPart
+	x := 0
+	for _, p := range parts {
+		if p.N == 0 {
+			continue
+		}
+		if len(bar) > 0 {
+			x += gap
+		}
+		p.X, p.W = x, max(p.N*1000/t.Calls, 8)
+		x += p.W
+		bar = append(bar, p)
+	}
+	return tiles, bar, x
 }
 
 func (s *Server) heldView() []heldView {
@@ -131,19 +230,6 @@ func diffClass(line string) string {
 		return "del"
 	}
 	return ""
-}
-
-func eventFrom(e audit.Event) eventView {
-	v := eventView{
-		ID:   fmt.Sprintf("event-%d", e.ID),
-		Time: e.Time.Format("15:04:05.000"), Dir: e.Direction, Method: e.Method, Tool: e.Tool, Server: e.Upstream,
-		Decision: e.Decision, Rule: e.Rule, Reason: e.Reason, Findings: e.Findings, Error: e.Error, Failed: e.IsError,
-		Params: shorten(e.Params, maxShownPayload), Result: shorten(e.Result, maxShownPayload),
-	}
-	if e.Duration > 0 {
-		v.Duration = e.Duration.Round(time.Millisecond).String()
-	}
-	return v
 }
 
 func shorten(s string, n int) string {

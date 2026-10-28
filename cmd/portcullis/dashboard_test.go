@@ -107,6 +107,22 @@ policy:
 		t.Errorf("denied call = %q", got)
 	}
 
+	// The timeline shows both calls and how they ended.
+	res, err := http.Get(dashURL + "main?show=caught")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	for _, want := range []string{`<span class="who">you</span> denied`, "beta__whoami"} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("timeline lacks %q", want)
+		}
+	}
+	if strings.Contains(string(page), "alpha__whoami") {
+		t.Error("an approved call is listed as caught")
+	}
+
 	_ = cs.Close()
 	_ = cmd.Wait()
 	token := strings.TrimSuffix(dashURL[strings.LastIndex(strings.TrimSuffix(dashURL, "/"), "/")+1:], "/")

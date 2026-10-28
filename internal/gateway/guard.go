@@ -48,6 +48,7 @@ type callNote struct {
 	// and injected is whether they judged it an injection.
 	injection string
 	injected  bool
+	withheld  bool // the result was withheld as an injection
 	// approval is how a call that needed a person's approval ended.
 	approval approval.Outcome
 }
@@ -143,7 +144,7 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 		Time: time.Now(), Direction: audit.Internal, Upstream: upstream, Method: method, Tool: name,
 		Reason: c.held, Findings: strings.Join(findings, "; "), IsError: c.held != "",
 	}
-	if method != "tool/pinned" && g.opts.Recorder != nil {
+	if method != "tool/pinned" && (g.opts.Recorder != nil || g.opts.Observer != nil) {
 		e.Params = marshal(def)
 	}
 	attrs := []any{"upstream", upstream, "tool", name}

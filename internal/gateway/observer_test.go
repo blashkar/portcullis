@@ -96,3 +96,32 @@ func TestObserverApprovals(t *testing.T) {
 		t.Errorf("details = %+v", d)
 	}
 }
+
+// An observer gets the payloads without a recorder, and learns when a
+// result was withheld.
+func TestObserverWithheldAndPayloads(t *testing.T) {
+	o := &observer{}
+	h := startWith(t, map[string]*mcp.Server{"web": webServer()}, func(opts *Options) {
+		opts.Observer = o
+		opts.Inject = InjectOptions{Detector: &inject.Detector{}, Action: InjectBlock}
+	})
+	if _, err := h.call("web__fetch_evil", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.call("web__fetch_clean", nil); err != nil {
+		t.Fatal(err)
+	}
+	if d := o.details(t, "web__fetch_evil"); !d.Injection || !d.Withheld {
+		t.Errorf("evil: %+v", d)
+	}
+	if d := o.details(t, "web__fetch_clean"); d.Withheld {
+		t.Errorf("clean: %+v", d)
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, x := range o.got {
+		if x.e.Tool == "web__fetch_evil" && (!strings.Contains(x.e.Params, "web__fetch_evil") || !strings.Contains(x.e.Result, "withheld")) {
+			t.Errorf("payloads: %q %q", x.e.Params, x.e.Result)
+		}
+	}
+}
