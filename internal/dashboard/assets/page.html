@@ -51,6 +51,91 @@
   {{end}}
 </section>
 
+{{if .Live}}
+<section aria-labelledby="overview">
+  <h2 id="overview">This session</h2>
+  <div class="tiles">
+    {{range .Tiles}}
+    <div class="tile">
+      <span class="label">{{.Label}}</span>
+      <span class="value {{.Tone}}">{{.Value}}</span>
+      {{if .Note}}<span class="note">{{.Note}}</span>{{end}}
+    </div>
+    {{end}}
+  </div>
+  {{if .Bar}}
+  <div class="tile">
+    <span class="label">How tool calls were decided</span>
+    <svg class="bar" viewBox="0 0 {{.BarWidth}} 14" preserveAspectRatio="none" role="img" aria-label="{{range $i, $p := .Bar}}{{if $i}}, {{end}}{{$p.N}} {{$p.Label}}{{end}}">
+      {{range .Bar}}<rect class="seg {{.Tone}}" x="{{.X}}" y="0" width="{{.W}}" height="14" rx="3"></rect>{{end}}
+    </svg>
+    <div class="legend">
+      {{range .Bar}}<span><span class="swatch {{.Tone}}"></span>{{.N}} {{.Label}}</span>{{end}}
+    </div>
+  </div>
+  {{end}}
+</section>
+
+<div class="split">
+<section aria-labelledby="timeline" class="timeline">
+  <div class="heading">
+    <h2 id="timeline">Timeline</h2>
+    <span class="meta">Each row follows one request from the agent to the server and back, newest first</span>
+  </div>
+  <nav class="filters" aria-label="Filter the timeline">
+    {{range .Filters}}<a href="{{.Href}}" class="filter{{if .On}} on{{end}}"{{if .On}} aria-current="true"{{end}} data-nav>{{.Label}}</a>{{end}}
+  </nav>
+  {{if not .Rows}}
+  <p class="empty">{{if eq .Show "all"}}Nothing yet: calls appear here as the agent makes them.{{else}}Nothing matches this filter.{{end}}</p>
+  {{end}}
+  <ol class="rows">
+    {{range .Rows}}
+    <li>
+      <a href="{{.Href}}" class="row{{if .Caught}} caught{{end}}{{if .Selected}} selected{{end}}"{{if .Selected}} aria-current="true"{{end}} data-nav>
+        <span class="line">
+          <span class="time">{{.Time}}</span>
+          <span class="tool">{{visible .Title}}</span>
+          {{if .Summary}}<span class="summary">{{visible .Summary}}</span>{{end}}
+        </span>
+        <span class="stages">
+          {{range $i, $s := .Stages}}{{if $i}}<span class="arrow" aria-hidden="true">→</span>{{end}}<span class="stage {{$s.Tone}}"><span class="who">{{$s.Who}}</span> {{$s.What}}</span>{{end}}
+        </span>
+      </a>
+    </li>
+    {{end}}
+  </ol>
+</section>
+
+<aside aria-labelledby="details" class="details" id="detail">
+  <h2 id="details">Details</h2>
+  {{with .Detail}}
+  <div class="what">
+    <span class="tool big">{{visible .Title}}</span>
+    <span class="stage {{.Tone}}">{{.Verdict}}</span>
+  </div>
+  {{if .Explain}}<p>{{visible .Explain}}</p>{{end}}
+  <dl>
+    <dt>Time</dt><dd>{{.Time}}</dd>
+    {{if .Server}}<dt>Server</dt><dd>{{visible .Server}}</dd>{{end}}
+    {{if .HasRule}}<dt>Rule</dt><dd class="mono">{{visible .Rule}}</dd>{{end}}
+    {{if .Reason}}<dt>Reason</dt><dd>{{visible .Reason}}</dd>{{end}}
+    {{if .Took}}<dt>Took</dt><dd>{{.Took}}</dd>{{end}}
+    {{if .Would}}<dt>Log-only rule</dt><dd>would have: {{visible .Would}}</dd>{{end}}
+  </dl>
+  {{if .Findings}}
+  <p class="label">What portcullis found</p>
+  <ul class="findings">{{range .Findings}}<li>{{visible .}}</li>{{end}}</ul>
+  {{end}}
+  {{if .Input}}<p class="label">{{.InputLabel}}</p><pre>{{visible .Input}}</pre>{{end}}
+  {{if .Output}}<p class="label">{{.OutputLabel}}{{if .Failed}} (an error){{end}}</p><pre>{{visible .Output}}</pre>{{end}}
+  <p><a href="{{$.Unselect}}" data-nav>Close</a></p>
+  {{else}}
+  {{if .Gone}}<p class="empty">That event is no longer in the recent list; the audit log has it.</p>{{else}}<p class="empty">Select a row to see what was sent, what came back, and what portcullis did.</p>{{end}}
+  {{end}}
+</aside>
+</div>
+{{end}}
+
 <section>
   <h2>Tools held back</h2>
   {{if not .Held}}<p class="empty">No tools are held back.</p>{{end}}
@@ -76,31 +161,6 @@
   {{end}}
 </section>
 
-<section>
-  <h2>Activity</h2>
-  {{if not .Events}}<p class="empty">Nothing yet.</p>{{end}}
-  <table class="events">
-    {{range .Events}}
-    <tr class="{{if .Failed}}failed{{end}}">
-      <td class="time">{{.Time}}</td>
-      <td>{{visible .Method}}{{if .Tool}} <span class="tool">{{visible .Tool}}</span>{{end}}</td>
-      <td>{{if .Decision}}<span class="decision {{.Decision}}">{{visible .Decision}}</span>{{end}}{{if .Rule}}<div class="meta">{{visible .Rule}}</div>{{end}}</td>
-      <td class="detail">
-        {{if .Reason}}<div>{{visible .Reason}}</div>{{end}}
-        {{if .Findings}}<div class="warn">{{visible .Findings}}</div>{{end}}
-        {{if .Error}}<div class="error">{{visible .Error}}</div>{{end}}
-        {{if or .Params .Result}}
-        <details id="{{.ID}}">
-          <summary>{{.Dir}}{{if .Server}} · {{visible .Server}}{{end}}{{if .Duration}} · {{.Duration}}{{end}}</summary>
-          {{if .Params}}<p class="label">params</p><pre>{{visible .Params}}</pre>{{end}}
-          {{if .Result}}<p class="label">result</p><pre>{{visible .Result}}</pre>{{end}}
-        </details>
-        {{end}}
-      </td>
-    </tr>
-    {{end}}
-  </table>
-</section>
 {{- end}}
 
 {{define "gone" -}}

@@ -56,6 +56,9 @@ func (g *Gateway) checkToolResult(ctx context.Context, tool string, res *mcp.Cal
 	}
 	switch g.opts.Inject.Action {
 	case InjectBlock:
+		if n := noteFrom(ctx); n != nil {
+			n.withheld = true
+		}
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: injectWithheld}}}
 	case InjectLog:
 		return res
@@ -81,6 +84,9 @@ func (g *Gateway) checkResource(ctx context.Context, uri string, res *mcp.ReadRe
 	v := d.Check(ctx, strings.Join(texts, "\n"))
 	g.noteInjection(ctx, uri, v)
 	if v.Injection && g.opts.Inject.Action == InjectBlock {
+		if n := noteFrom(ctx); n != nil {
+			n.withheld = true
+		}
 		return &blockedResourceError{}
 	}
 	return nil

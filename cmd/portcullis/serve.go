@@ -154,6 +154,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		log.Info("audit log", "path", path)
 	}
 
+	var obs observers // the dashboard and the metrics
 	var dashLn net.Listener
 	var dashOpts dashboard.Options
 	var broker *approval.Broker
@@ -166,13 +167,9 @@ func runServe(ctx context.Context, opts serveOptions) error {
 			dashLn = ln
 			hub := dashboard.NewHub()
 			broker = approval.NewBroker(cfg.Dashboard.ApprovalTimeout, hub.Notify)
-			feed := dashboard.NewFeed(200, hub.Notify)
+			feed := dashboard.NewFeed(200, redactor, hub.Notify)
 			gwOpts.Approver = broker
-			if gwOpts.Recorder != nil {
-				gwOpts.Recorder = recorders{gwOpts.Recorder, feed}
-			} else {
-				gwOpts.Recorder = feed
-			}
+			obs = append(obs, feed)
 			dashOpts = dashboard.Options{Hub: hub, Approvals: broker, Feed: feed, Pins: gwOpts.Pins, Version: version, SessionID: sessionID, Logger: log}
 		}
 	} else if pol.NeedsApproval() {
@@ -200,10 +197,13 @@ func runServe(ctx context.Context, opts serveOptions) error {
 				mo.Pending = func() int { return len(broker.Pending()) }
 			}
 			met = metrics.New(mo)
-			gwOpts.Observer = met
+			obs = append(obs, met)
 		}
 	}
 
+	if len(obs) > 0 {
+		gwOpts.Observer = obs
+	}
 	gw = gateway.New(gwOpts)
 	defer func() {
 		if err := gw.Close(); err != nil {

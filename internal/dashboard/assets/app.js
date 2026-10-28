@@ -15,7 +15,8 @@ async function refresh() {
   }
   busy = true;
   try {
-    const res = await fetch("main", { cache: "no-store" });
+    // The query holds the timeline's filter and selected event.
+    const res = await fetch("main" + location.search, { cache: "no-store" });
     if (res.ok) {
       // Keep open sections open across the refresh.
       const open = [...main.querySelectorAll("details[open]")].map((d) => d.id).filter(Boolean);
@@ -42,6 +43,25 @@ function showPending() {
   const n = section ? Number(section.dataset.pending) : 0;
   document.title = n > 0 ? `(${n}) waiting · portcullis` : "portcullis";
 }
+
+// Choosing a filter or a row changes the address and fetches the main
+// section again, rather than loading the whole page. Without this script
+// the links load the page.
+main.addEventListener("click", async (ev) => {
+  const a = ev.target.closest("a[data-nav]");
+  if (!a || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+  const to = new URL(a.href);
+  if (to.origin !== location.origin || to.pathname !== location.pathname) return;
+  ev.preventDefault();
+  history.pushState(null, "", to.search || location.pathname);
+  await refresh();
+  // On a narrow screen the details are below the timeline: bring them up.
+  const detail = document.getElementById("detail");
+  if (to.searchParams.has("event") && detail && detail.getBoundingClientRect().top > window.innerHeight) {
+    detail.scrollIntoView({ block: "start" });
+  }
+});
+window.addEventListener("popstate", refresh);
 
 const events = new EventSource("events");
 events.addEventListener("change", refresh);

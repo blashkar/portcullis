@@ -18,6 +18,8 @@ type Details struct {
 	// Approval is how a call that needed a person's approval ended:
 	// approved, denied, expired, cancelled or refused; "" if it didn't need one.
 	Approval string
+	// Withheld is true when the result was withheld as an injection.
+	Withheld bool
 }
 
 func (n *callNote) details() Details {
@@ -30,6 +32,7 @@ func (n *callNote) details() Details {
 	}
 	d.Injection = n.injected
 	d.Suspicious = n.injection != "" && !n.injected
+	d.Withheld = n.withheld
 	if n.approval != 0 {
 		d.Approval = n.approval.String()
 	}

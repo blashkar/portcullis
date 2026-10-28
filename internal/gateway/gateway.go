@@ -59,7 +59,8 @@ type Options struct {
 	SessionID string
 	Logger    *slog.Logger
 	Recorder  Recorder // nil disables the audit log
-	// Observer, if set, is told about every event too, such as for metrics.
+	// Observer, if set, is told about every event too, such as for metrics
+	// or the dashboard, with the same payloads as the Recorder.
 	Observer Observer
 	Policy   *policy.Policy // nil allows every call
 	// Approver asks a person about calls the policy says need approval.
@@ -699,7 +700,7 @@ func (g *Gateway) describe(e *audit.Event, params mcp.Params, res mcp.Result) {
 	if r, ok := res.(*mcp.CallToolResult); ok && r != nil && r.IsError {
 		e.IsError = true
 	}
-	if g.opts.Recorder != nil {
+	if g.opts.Recorder != nil || g.opts.Observer != nil {
 		e.Params = marshal(params)
 		e.Result = marshal(res)
 	}

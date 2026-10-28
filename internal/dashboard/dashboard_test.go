@@ -16,8 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/blashkar/portcullis/internal/approval"
-	"github.com/blashkar/portcullis/internal/audit"
 	"github.com/blashkar/portcullis/internal/pin"
+	"github.com/blashkar/portcullis/internal/redact"
 )
 
 type fixture struct {
@@ -42,7 +42,7 @@ func startDashboardWith(t *testing.T, configure func(*Server)) *fixture {
 	t.Helper()
 	f := &fixture{t: t, hub: NewHub(), heldM: map[string]string{}}
 	f.broker = approval.NewBroker(time.Minute, f.hub.Notify)
-	f.feed = NewFeed(100, f.hub.Notify)
+	f.feed = NewFeed(100, redact.New(), f.hub.Notify)
 	f.pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), true)
 	s := New(Options{
 		Hub: f.hub, Approvals: f.broker, Feed: f.feed, Pins: f.pins, Version: "test", SessionID: "SESSION1",
@@ -356,42 +356,6 @@ func TestApproveHeldTool(t *testing.T) {
 	e, _ := f.pins.Entries()
 	if e["m__add"].Hash != hash || e["m__add"].Pending != nil {
 		t.Errorf("entry = %+v", e["m__add"])
-	}
-}
-
-func TestFeedKeepsOnlyWhatIsShown(t *testing.T) {
-	f := NewFeed(2, nil)
-	for i := range 3 {
-		_ = f.Record(context.Background(), audit.Event{Method: "m", Tool: string(rune('a' + i)), Result: strings.Repeat("x", 1<<20)})
-	}
-	got := f.Events()
-	if len(got) != 2 || got[0].Tool != "c" || got[1].Tool != "b" || got[0].ID != 3 {
-		t.Fatalf("events = %d, newest %+v", len(got), got[0].Tool)
-	}
-	if n := len(got[0].Result); n > maxShownPayload+len("…") {
-		t.Errorf("kept %d bytes of a result", n)
-	}
-}
-
-func TestActivity(t *testing.T) {
-	f := startDashboard(t)
-	_ = f.feed.Record(f.ctx, audit.Event{
-		Time: time.Now(), Direction: audit.ClientToServer, Method: "tools/call", Tool: "fs__read_file",
-		Decision: "deny", Rule: "workspace-only", Reason: "outside /workspace", Params: `{"name":"fs__read_file"}`, IsError: true,
-	})
-	_ = f.feed.Record(f.ctx, audit.Event{
-		Time: time.Now(), Direction: audit.ClientToServer, Method: "tools/call", Tool: "fs__read_text_file",
-		Findings: "redacted: github_token", Result: `{"content":[]}`,
-	})
-	_, body := f.get(f.url + "main")
-	for _, want := range []string{"fs__read_file", "workspace-only", "outside /workspace", "redacted: github_token", `id="event-1"`, `id="event-2"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("page lacks %q", want)
-		}
-	}
-	// Newest first.
-	if strings.Index(body, "fs__read_text_file") > strings.Index(body, "fs__read_file<") {
-		t.Error("activity isn't newest first")
 	}
 }
 

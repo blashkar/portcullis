@@ -220,12 +220,12 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) page(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "page", s.view())
+func (s *Server) page(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "page", s.view(r))
 }
 
-func (s *Server) main(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "main", s.view())
+func (s *Server) main(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "main", s.view(r))
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, v pageView) {
