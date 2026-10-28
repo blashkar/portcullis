@@ -67,7 +67,9 @@ type story struct {
 	verdict string
 	tone    string
 	explain string
-	caught  bool // portcullis acted on it: blocked, held, redacted or flagged
+	caught  bool   // portcullis acted on it: blocked, held, redacted or flagged
+	by      string // what caught it, such as "policy rule no-etc"
+	outcome string // what came of it, such as "denied; the server never saw it"
 }
 
 // tell works out the story of e.
@@ -84,10 +86,16 @@ func tell(e Event) story {
 				{"agent", "not offered", toneMute},
 			},
 			verdict: "Rug pull held", tone: toneBad, caught: true,
+			by: "tool pinning", outcome: "tool held until you approve the change",
 			explain: "The server changed this tool after it was approved. It is held back until you review the change.",
 		}
 	case "tool/held":
+		by := "tool pinning"
+		if strings.Contains(e.Reason, "poison") {
+			by = "the tool-poisoning scanner"
+		}
 		return story{
+			by: by, outcome: "tool hidden from the agent",
 			title: e.Tool,
 			stages: []stage{
 				{"server", "offered it", toneMute},
@@ -106,6 +114,7 @@ func tell(e Event) story {
 				{"agent", "offered", toneOK},
 			},
 			verdict: "Tool flagged", tone: toneWarn, caught: true,
+			by: "the tool-poisoning scanner", outcome: "tool still offered",
 			explain: "The scanner noticed something in this tool's definition, not enough to hide it.",
 		}
 	case "upstream/disconnected":
@@ -132,24 +141,28 @@ func tellCall(e Event) story {
 		s.title, verb, s.verdict = "resource", "read a resource", "Answered"
 	}
 	s.stages = append(s.stages, stage{"agent", verb, toneMute})
-	ruled := ""
+	ruled, rule := "", "the policy's default"
 	if e.Rule != "" {
-		ruled = fmt.Sprintf(" Rule %q decided it.", e.Rule)
+		ruled, rule = fmt.Sprintf(" Rule %q decided it.", e.Rule), "rule "+e.Rule
 	}
+	const unseen = "; the server never saw it"
 
 	forwarded := false
 	switch e.Decision {
 	case audit.DecisionHeld:
 		s.stages = append(s.stages, stage{"portcullis", "tool held", toneBad})
 		s.verdict, s.tone, s.caught = "Blocked: tool held", toneBad, true
+		s.by, s.outcome = "a held tool", "error returned"+unseen
 		s.explain = "The tool is held back, so the call never reached the server. " + sentence(e.Reason)
 	case "deny":
 		s.stages = append(s.stages, stage{"policy", "denied", toneBad})
 		s.verdict, s.tone, s.caught = "Denied by policy", toneBad, true
+		s.by, s.outcome = "policy: "+rule, "denied"+unseen
 		s.explain = "The policy blocked the call before it reached the server." + ruled + reasonSentence(e.Reason)
 	case "rate_limit":
 		s.stages = append(s.stages, stage{"policy", "rate limited", toneBad})
 		s.verdict, s.tone, s.caught = "Rate limited", toneBad, true
+		s.by, s.outcome = "rate limit: "+rule, "blocked"+unseen
 		s.explain = "Too many calls in a short time, so this one was blocked." + ruled
 	case audit.DecisionApproved:
 		s.stages = append(s.stages, stage{"policy", "needs approval", toneInfo}, stage{"you", "approved", toneInfo})
@@ -158,20 +171,20 @@ func tellCall(e Event) story {
 		forwarded = true
 	case "require_approval":
 		s.stages = append(s.stages, stage{"policy", "needs approval", toneInfo})
-		s.tone, s.caught = toneBad, true
+		s.tone, s.caught, s.by = toneBad, true, "approval: "+rule
 		switch e.Details.Approval {
 		case "denied":
 			s.stages = append(s.stages, stage{"you", "denied", toneBad})
-			s.verdict = "Denied by you"
+			s.verdict, s.outcome = "Denied by you", "denied by you"+unseen
 		case "expired":
 			s.stages = append(s.stages, stage{"you", "didn't answer", toneBad})
-			s.verdict = "Not approved in time"
+			s.verdict, s.outcome = "Not approved in time", "denied when nobody answered"+unseen
 		case "cancelled":
 			s.stages = append(s.stages, stage{"agent", "gave up waiting", toneMute})
-			s.verdict, s.tone = "Cancelled while waiting", toneMute
+			s.verdict, s.tone, s.outcome = "Cancelled while waiting", toneMute, "the agent cancelled it"+unseen
 		default:
 			s.stages = append(s.stages, stage{"portcullis", "couldn't ask", toneBad})
-			s.verdict = "Not approved"
+			s.verdict, s.outcome = "Not approved", "refused"+unseen
 		}
 		s.explain = "This call needed a person's approval and didn't get it, so it never reached the server. " + sentence(e.Reason)
 	case "allow":
@@ -209,14 +222,17 @@ func tellCall(e Event) story {
 		s.stages = append(s.stages, stage{"checks", "injection", toneBad})
 		got = stage{"agent", "got a notice instead", toneWarn}
 		s.verdict, s.tone, s.caught = "Injection withheld", toneBad, true
+		s.by, s.outcome = "the injection checks", "result withheld; the agent got a notice"
 		s.explain = "The result looked like a prompt injection, so the agent got a notice instead of it."
 	case d.Injection:
 		s.stages = append(s.stages, stage{"checks", "injection", toneWarn})
 		got = stage{"agent", "got it unchanged", toneWarn}
 		s.explain = "The result looked like a prompt injection. It was only logged."
+		s.by, s.outcome = "the injection checks", "delivered unchanged (log mode)"
 		if strings.HasPrefix(e.Output, "[portcullis] Warning") {
 			got = stage{"agent", "got it with a warning", toneWarn}
 			s.explain = "The result looked like a prompt injection, so it went to the agent with a warning in front."
+			s.outcome = "delivered with a warning"
 		}
 		s.verdict, s.tone, s.caught = "Prompt injection flagged", toneWarn, true
 	case d.Suspicious:
@@ -228,7 +244,12 @@ func tellCall(e Event) story {
 		s.stages = append(s.stages, stage{"checks", plural(n, "secret") + " redacted", toneWarn})
 		if !s.caught {
 			s.verdict, s.tone, s.caught = "Secrets redacted", toneWarn, true
-			s.explain = fmt.Sprintf("The result held %s. They were replaced before the agent or the audit log saw them.", plural(n, "secret"))
+			they, them := "They were", "them"
+			if n == 1 {
+				they, them = "It was", "it"
+			}
+			s.explain = fmt.Sprintf("The result held %s. %s replaced before the agent or the audit log saw %s.", plural(n, "secret"), they, them)
+			s.by, s.outcome = "secret redaction", "delivered without the secrets"
 		}
 		if got.Tone == toneOK {
 			got.What = "got it redacted"
@@ -269,8 +290,35 @@ func reasonSentence(r string) string {
 	return " " + sentence(r)
 }
 
+// nav is where the timeline is: which page, session, filter and event.
+type nav struct {
+	base    string // "./" for the live page, "sessions" for a past session
+	session string // the past session shown
+	show    string
+	event   int64
+}
+
+// link is the page's address with a filter and a selected event.
+func (n nav) link(show string, event int64) string {
+	q := url.Values{}
+	if n.session != "" {
+		q.Set("id", n.session)
+	}
+	if show != showAll && show != "" {
+		q.Set("show", show)
+	}
+	if event > 0 {
+		q.Set("event", strconv.FormatInt(event, 10))
+	}
+	if len(q) == 0 {
+		return n.base
+	}
+	return n.base + "?" + q.Encode()
+}
+
 // timeline builds the rows to show, newest first, and the selected event.
-func timeline(events []Event, show string, selected int64) (rows []rowView, detail *detailView, found bool) {
+func timeline(events []Event, n nav) (rows []rowView, detail *detailView, found bool) {
+	show, selected := n.show, n.event
 	for _, e := range events {
 		s := tell(e)
 		if e.ID == selected {
@@ -285,7 +333,7 @@ func timeline(events []Event, show string, selected int64) (rows []rowView, deta
 			title = e.Method
 		}
 		rows = append(rows, rowView{
-			ID: e.ID, Href: link(show, e.ID), Selected: e.ID == selected, Caught: s.caught,
+			ID: e.ID, Href: n.link(show, e.ID), Selected: e.ID == selected, Caught: s.caught,
 			Time: e.Time.Format(time.TimeOnly), Title: title, Summary: e.Summary, Stages: s.stages,
 		})
 	}
@@ -325,21 +373,6 @@ func detailOf(e Event, s story) *detailView {
 		d.Findings = strings.Split(e.Findings, "; ")
 	}
 	return d
-}
-
-// link is the dashboard's address with a filter and a selected event.
-func link(show string, event int64) string {
-	q := url.Values{}
-	if show != showAll {
-		q.Set("show", show)
-	}
-	if event > 0 {
-		q.Set("event", strconv.FormatInt(event, 10))
-	}
-	if len(q) == 0 {
-		return "./"
-	}
-	return "./?" + q.Encode()
 }
 
 // parseShow reads the filter from a request's query; anything else is all.

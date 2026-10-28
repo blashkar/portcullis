@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
-<title>portcullis</title>
+<title>{{.Title}} · portcullis</title>
 <link rel="stylesheet" href="static/style.css">
 <script src="static/app.js" defer></script>
 </head>
@@ -15,7 +15,7 @@
   <span class="meta">session {{.SessionID}} · {{.Version}}</span>
   <span id="live" class="live" hidden>live</span>
 </header>
-<main id="main">
+<main id="main" data-partial="{{.Partial}}" data-title="{{.Title}}">
 {{template "main" .}}
 </main>
 </body>
@@ -23,7 +23,20 @@
 {{- end}}
 
 {{define "main" -}}
-<section data-pending="{{len .Pending}}">
+<nav class="tabs" aria-label="Dashboard pages" data-pending="{{len .Pending}}">
+  {{range .Tabs}}<a href="{{.Href}}" class="tab{{if .On}} on{{end}}"{{if .On}} aria-current="page"{{end}}>{{.Label}}{{if .Count}} <span class="count {{.Tone}}">{{.Count}}</span>{{end}}</a>{{end}}
+</nav>
+{{if and .Pending (ne .Page "")}}
+<p class="banner">{{len .Pending}} {{if eq (len .Pending) 1}}call is{{else}}calls are{{end}} waiting for your approval. <a href="./">Open Live to decide</a></p>
+{{end}}
+{{if eq .Page "security"}}{{template "security" .}}
+{{else if eq .Page "servers"}}{{template "servers" .}}
+{{else if eq .Page "sessions"}}{{template "sessions" .}}
+{{else}}{{template "live" .}}{{end}}
+{{- end}}
+
+{{define "live" -}}
+<section>
   <h2>Waiting for approval</h2>
   {{if not .Approvals}}
   <p class="empty">Approvals are off: calls that need approval are blocked.</p>
@@ -75,7 +88,36 @@
   </div>
   {{end}}
 </section>
+{{template "timeline" .}}
+{{end}}
 
+<section>
+  <h2>Tools held back</h2>
+  {{if not .Held}}<p class="empty">No tools are held back.</p>{{end}}
+  {{range .Held}}
+  <article class="held">
+    <div class="what"><span class="tool">{{visible .Name}}</span>{{if .Status}} <span class="badge">{{.Status}}</span>{{end}}</div>
+    <p class="meta">{{visible .Reason}}</p>
+    {{if .Diff}}
+    <details id="diff-{{.Name}}">
+      <summary>Definition {{if eq .Status "new"}}offered{{else}}changes{{end}}</summary>
+      <pre class="diff">{{range .Diff}}<span class="{{.Class}}">{{visible .Text}}</span>
+{{end}}</pre>
+    </details>
+    {{end}}
+    {{if .Hash}}
+    <form method="post" action="approve-tool" class="buttons">
+      <input type="hidden" name="tool" value="{{.Name}}">
+      <input type="hidden" name="hash" value="{{.Hash}}">
+      <button class="approve">Approve this definition</button>
+    </form>
+    {{end}}
+  </article>
+  {{end}}
+</section>
+{{- end}}
+
+{{define "timeline" -}}
 <div class="split">
 <section aria-labelledby="timeline" class="timeline">
   <div class="heading">
@@ -134,33 +176,103 @@
   {{end}}
 </aside>
 </div>
-{{end}}
+{{- end}}
 
-<section>
-  <h2>Tools held back</h2>
-  {{if not .Held}}<p class="empty">No tools are held back.</p>{{end}}
-  {{range .Held}}
-  <article class="held">
-    <div class="what"><span class="tool">{{visible .Name}}</span>{{if .Status}} <span class="badge">{{.Status}}</span>{{end}}</div>
-    <p class="meta">{{visible .Reason}}</p>
-    {{if .Diff}}
-    <details id="diff-{{.Name}}">
-      <summary>Definition {{if eq .Status "new"}}offered{{else}}changes{{end}}</summary>
-      <pre class="diff">{{range .Diff}}<span class="{{.Class}}">{{visible .Text}}</span>
-{{end}}</pre>
-    </details>
-    {{end}}
-    {{if .Hash}}
-    <form method="post" action="approve-tool" class="buttons">
-      <input type="hidden" name="tool" value="{{.Name}}">
-      <input type="hidden" name="hash" value="{{.Hash}}">
-      <button class="approve">Approve this definition</button>
-    </form>
-    {{end}}
+{{define "security" -}}
+<section aria-labelledby="security">
+  <div class="heading">
+    <h2 id="security">Security events</h2>
+    <span class="meta">What portcullis caught this session, newest first</span>
+  </div>
+  {{if not .Cards}}<p class="empty">Nothing caught yet. Blocked calls, held tools, redacted secrets and prompt injections appear here.</p>{{end}}
+  {{range .Cards}}
+  <article class="card">
+    <div class="what">
+      <span class="stage {{.Tone}}">{{.Verdict}}</span>
+      <span class="tool">{{visible .Title}}</span>
+      <span class="meta push">{{.Time}}</span>
+    </div>
+    {{if .Explain}}<p>{{visible .Explain}}</p>{{end}}
+    <dl class="facts">
+      {{if .By}}<dt>Caught by</dt><dd>{{visible .By}}</dd>{{end}}
+      {{if .Outcome}}<dt>Outcome</dt><dd>{{.Outcome}}</dd>{{end}}
+      {{if .Summary}}<dt>Arguments</dt><dd class="mono">{{visible .Summary}}</dd>{{end}}
+    </dl>
+    {{if .Findings}}<ul class="findings">{{range .Findings}}<li>{{visible .}}</li>{{end}}</ul>{{end}}
+    <p><a href="{{.Href}}">See it in the timeline</a></p>
   </article>
   {{end}}
 </section>
+{{- end}}
 
+{{define "servers" -}}
+<section aria-labelledby="servers">
+  <div class="heading">
+    <h2 id="servers">Servers &amp; tools</h2>
+    <span class="meta">What each server offers, and what portcullis does with calls to it</span>
+  </div>
+  {{if not .Servers}}<p class="empty">No servers are connected.</p>{{end}}
+  {{range .Servers}}
+  <article class="card">
+    <div class="what">
+      <span class="tool big">{{visible .Name}}</span>
+      {{if .Connected}}<span class="stage ok">connected</span>{{else}}<span class="stage bad">disconnected</span>{{end}}
+      {{if .Sandboxed}}<span class="stage ok">Docker sandbox</span>{{else}}<span class="stage warn">not sandboxed</span>{{end}}
+    </div>
+    <dl class="facts">
+      <dt>Command</dt><dd class="mono">{{visible .Command}}</dd>
+      <dt>Tools</dt><dd>{{.Offered}} offered{{if .Held}}, {{.Held}} held back{{end}}</dd>
+    </dl>
+    {{if .Sandboxed}}<p class="meta">Runs in a container with no network, no files from this machine, a read-only system and no root.</p>
+    {{else}}<p class="warn">This server runs directly on this machine, with your user's access to files and the network. portcullis checks what it sends, but can't contain it.</p>{{end}}
+    <ul class="tools">
+      {{range .Tools}}
+      <li>
+        <div class="what"><span class="tool">{{visible .Name}}</span><span class="stage {{.Tone}}">{{.Status}}</span></div>
+        {{if .Note}}<p class="meta">{{visible .Note}}</p>{{end}}
+        {{if .Rules}}<p class="meta">{{range $i, $r := .Rules}}{{if $i}} · {{end}}{{visible $r}}{{end}}</p>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </article>
+  {{end}}
+</section>
+{{- end}}
+
+{{define "sessions" -}}
+<section aria-labelledby="sessions">
+  <div class="heading">
+    <h2 id="sessions">Sessions</h2>
+    <span class="meta">Recorded in the audit log, newest first</span>
+  </div>
+  {{if not .HasAudit}}<p class="empty">The audit log is off, so past sessions aren't kept.</p>
+  {{else if .AuditErr}}<p class="error">The audit log couldn't be read; see portcullis's log.</p>
+  {{else}}
+  <div class="scroll">
+  <table class="sessions">
+    <thead><tr><th scope="col">Started</th><th scope="col">Length</th><th scope="col">Client</th><th scope="col">Servers</th><th scope="col">Tool calls</th><th scope="col">Blocked</th></tr></thead>
+    <tbody>
+    {{range .Sessions}}
+    <tr{{if .Selected}} class="selected"{{end}}>
+      <td><a href="{{.Href}}" data-nav{{if .Selected}} aria-current="true"{{end}}>{{.Started}}</a>{{if .Current}} <span class="badge">this one</span>{{end}}</td>
+      <td>{{if .Open}}open{{else}}{{.Length}}{{end}}</td>
+      <td>{{visible .Client}}</td>
+      <td>{{visible .Servers}}</td>
+      <td class="num">{{.Calls}}</td>
+      <td class="num">{{if .Blocked}}<span class="error">{{.Blocked}}</span>{{else}}0{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if .Picked}}
+  <h2>Session {{.Picked.ID}}</h2>
+  {{template "timeline" .}}
+  {{else if .Gone}}<p class="empty">That session isn't among the recent ones.</p>
+  {{else if .Sessions}}<p class="empty">Select a session to see its timeline.</p>
+  {{end}}
+  {{end}}
+</section>
 {{- end}}
 
 {{define "gone" -}}
