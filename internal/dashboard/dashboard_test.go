@@ -162,7 +162,7 @@ func TestSecurityHeaders(t *testing.T) {
 				t.Errorf("%s: CSP %q lacks %q", u, csp, want)
 			}
 		}
-		for h, want := range map[string]string{"X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store"} {
+		for h, want := range map[string]string{"X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin", "Cache-Control": "no-store"} {
 			if got := res.Header.Get(h); got != want {
 				t.Errorf("%s: %s = %q, want %q", u, h, got, want)
 			}
@@ -170,6 +170,11 @@ func TestSecurityHeaders(t *testing.T) {
 		if res.Header.Get("Set-Cookie") != "" {
 			t.Errorf("%s set a cookie", u)
 		}
+	}
+	// A meta tag overrides the header. Under no-referrer, browsers send
+	// "Origin: null" on the page's own form posts, and they're refused.
+	if _, body := f.get(f.url); !strings.Contains(body, `<meta name="referrer" content="same-origin">`) || strings.Contains(body, "no-referrer") {
+		t.Error("the page doesn't set the same-origin referrer policy")
 	}
 }
 
