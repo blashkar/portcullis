@@ -380,7 +380,7 @@ func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
 			RequestState:   req.Params.RequestState,
 		})
 		g.redactToolResult(ctx, res)
-		return g.checkToolResult(ctx, req.Params.Name, res), err
+		return g.checkToolResult(ctx, req.Params.Name, res), g.checkError(ctx, req.Params.Name, err)
 	}
 }
 
@@ -517,7 +517,7 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 			defer g.expectProgress(u.name, req.Params.GetProgressToken())()
 			res, err := s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
 			g.redactPrompt(ctx, res)
-			return res, err
+			return res, g.checkError(ctx, name, err)
 		})
 		seen[name] = true
 	}
@@ -585,12 +585,13 @@ func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
 		defer g.expectProgress(upstream, req.Params.GetProgressToken())()
 		res, err := s.ReadResource(ctx, &mcp.ReadResourceParams{Meta: req.Params.Meta, URI: req.Params.URI})
 		g.redactResource(ctx, res)
-		if err == nil {
-			if berr := g.checkResource(ctx, req.Params.URI, res); berr != nil {
-				return nil, berr
-			}
+		if err != nil {
+			return nil, g.checkError(ctx, req.Params.URI, err)
 		}
-		return res, err
+		if berr := g.checkResource(ctx, req.Params.URI, res); berr != nil {
+			return nil, berr
+		}
+		return res, nil
 	}
 }
 
