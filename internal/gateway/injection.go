@@ -3,11 +3,14 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/blashkar/portcullis/internal/inject"
+	"github.com/blashkar/portcullis/internal/redact"
 )
 
 // InjectAction is what happens to a result that looks like a prompt
@@ -90,6 +93,52 @@ func (g *Gateway) checkResource(ctx context.Context, uri string, res *mcp.ReadRe
 		return &blockedResourceError{}
 	}
 	return nil
+}
+
+// checkError redacts and checks the text of an error from a server: the
+// client shows it to the model as it would a result, so a server could
+// otherwise answer with an error to get secrets or instructions past the
+// checks. The error's JSON-RPC code is kept. what names the tool, prompt or
+// resource, for the log.
+func (g *Gateway) checkError(ctx context.Context, what string, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if g.opts.Redactor == nil && g.opts.Inject.Detector == nil {
+		return err
+	}
+	// The message is the one the client would have got: the SDK sends the
+	// whole error's text, with the code of the server's error inside it.
+	out := &jsonrpc.Error{Message: err.Error()}
+	var we *jsonrpc.Error
+	if errors.As(err, &we) {
+		out.Code = we.Code
+	}
+	if g.opts.Redactor != nil {
+		counts := redact.Counts{}
+		out.Message = g.redactString(out.Message, counts)
+		g.noteRedactions(ctx, counts)
+	}
+	d := g.opts.Inject.Detector
+	if d == nil {
+		return out
+	}
+	v := d.Check(ctx, out.Message)
+	g.noteInjection(ctx, what, v)
+	if !v.Injection {
+		return out
+	}
+	switch g.opts.Inject.Action {
+	case InjectBlock:
+		if n := noteFrom(ctx); n != nil {
+			n.withheld = true
+		}
+		out.Message = strings.Replace(injectWithheld, "This tool result", "The server's error message", 1)
+	case InjectLog:
+	default:
+		out.Message = strings.Replace(injectWarning, "this tool result", "this error message from a server", 1) + "\n\n" + out.Message
+	}
+	return out
 }
 
 type blockedResourceError struct{}
