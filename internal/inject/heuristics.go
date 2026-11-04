@@ -44,7 +44,7 @@ var patterns = []pattern{
 	{"override", scan.High, re(`\b(ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+)*(previous|prior|above|earlier|preceding|original|system)\s+(instructions?|prompts?|rules|directions|guidelines|guidance|messages)`)},
 	{"override", scan.High, re(`\byour\s+(guidelines|instructions|rules|system\s+prompt|policies)\s+(have|has)\s+(been\s+)?(changed|updated|replaced|revoked|lifted)`)},
 	{"override", scan.High, re(`\b(new|updated|real|actual|revised)\s+(system\s+)?instructions?\s*:`)},
-	{"override", scan.High, re(`\b(you\s+are\s+now|from\s+now\s+on,?\s+you\s+(are|will|must))\b`)},
+	{"persona", scan.High, re(`\b(you\s+are\s+now|from\s+now\s+on,?\s+you\s+(are|will|must))\b`)},
 	{"addressed-to-ai", scan.High, re(`\bif\s+you\s+are\s+an?\s+(ai|llm|language\s+model|assistant|agent|chatbot)\b`)},
 	{"addressed-to-ai", scan.High, re(`\b(note|attention|message|instructions?)\s+(to|for)\s+(the\s+)?(ai|llm|assistant|agent|language\s+model|claude|chatgpt|gpt)\b`)},
 	// Text that talks about the AI reading it: "the assistant reading this

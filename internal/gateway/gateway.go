@@ -517,7 +517,13 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 			defer g.expectProgress(u.name, req.Params.GetProgressToken())()
 			res, err := s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
 			g.redactPrompt(ctx, res)
-			return res, g.checkError(ctx, name, err)
+			if err != nil {
+				return nil, g.checkError(ctx, name, err)
+			}
+			if berr := g.checkPrompt(ctx, name, res); berr != nil {
+				return nil, berr
+			}
+			return res, nil
 		})
 		seen[name] = true
 	}

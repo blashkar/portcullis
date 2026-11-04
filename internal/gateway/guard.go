@@ -275,9 +275,21 @@ func (g *Gateway) redactContent(content []mcp.Content, counts redact.Counts) {
 		case *mcp.TextContent:
 			c.Text = g.redactString(c.Text, counts)
 		case *mcp.EmbeddedResource:
-			if c.Resource != nil {
-				c.Resource.Text = g.redactString(c.Resource.Text, counts)
-			}
+			g.redactResourceContents(c.Resource, counts)
+		}
+	}
+}
+
+// redactResourceContents redacts a resource's text, and its blob if that
+// is text too.
+func (g *Gateway) redactResourceContents(r *mcp.ResourceContents, counts redact.Counts) {
+	if r == nil {
+		return
+	}
+	r.Text = g.redactString(r.Text, counts)
+	if b, ok := blobText(r.Blob); ok {
+		if out := g.redactString(b, counts); out != b {
+			r.Blob = []byte(out)
 		}
 	}
 }
@@ -306,9 +318,7 @@ func (g *Gateway) redactResource(ctx context.Context, res *mcp.ReadResourceResul
 	}
 	counts := redact.Counts{}
 	for _, c := range res.Contents {
-		if c != nil {
-			c.Text = g.redactString(c.Text, counts)
-		}
+		g.redactResourceContents(c, counts)
 	}
 	g.noteRedactions(ctx, counts)
 }

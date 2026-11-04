@@ -50,6 +50,27 @@ func (d *Detector) Check(ctx context.Context, text string) Verdict {
 	return v
 }
 
+// notForPrompts are the checks that flag what a prompt template is for:
+// giving the assistant a persona, addressing it and naming tools.
+var notForPrompts = map[string]bool{"persona": true, "addressed-to-ai": true, "tool-call": true}
+
+// CheckPrompt checks a prompt template a server returned. Prompts are
+// instructions by design, so the guard model, which asks whether text tries
+// to steer the AI reading it, isn't asked, and neither are the checks in
+// notForPrompts. The rest still catch hidden text, keeping things from the
+// user, chat-template tokens, overriding earlier instructions and
+// exfiltration.
+func CheckPrompt(text string) Verdict {
+	var v Verdict
+	for _, f := range Heuristics(text) {
+		if !notForPrompts[f.Check] {
+			v.Findings = append(v.Findings, f)
+		}
+	}
+	v.Injection = MaxSeverity(v.Findings) == scan.High
+	return v
+}
+
 // Reason says briefly why a text was judged an injection.
 func (v Verdict) Reason() string {
 	if v.Guard != nil && v.Guard.Injection {
