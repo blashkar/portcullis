@@ -83,6 +83,11 @@ func runServe(ctx context.Context, opts serveOptions) error {
 	if err != nil {
 		return err
 	}
+	// Checked before anything starts: a server outside the sandbox has the
+	// user's access to this machine, portcullis's own files included.
+	if err := cfg.CheckSandbox(); err != nil {
+		return err
+	}
 	logger, closeLog, err := newLogger(opts.logFile, opts.logLevel)
 	if err != nil {
 		return err

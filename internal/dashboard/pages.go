@@ -4,7 +4,6 @@ import (
 	"context"
 	"maps"
 	"net/http"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/blashkar/portcullis/internal/audit"
+	"github.com/blashkar/portcullis/internal/config"
 	"github.com/blashkar/portcullis/internal/gateway"
 	"github.com/blashkar/portcullis/internal/policy"
 )
@@ -133,7 +133,7 @@ func (s *Server) serversView(v *pageView) {
 		cmd := s.o.Commands[info.Name]
 		sv := serverView{
 			Name: info.Name, Connected: info.Connected, Offered: len(info.Tools), Held: len(info.Held),
-			Command: shorten(strings.Join(cmd, " "), 300), Sandboxed: sandboxed(cmd),
+			Command: shorten(strings.Join(cmd, " "), 300), Sandboxed: config.Sandboxed(cmd),
 		}
 		for _, t := range info.Tools {
 			sv.Tools = append(sv.Tools, s.toolView(t))
@@ -143,16 +143,6 @@ func (s *Server) serversView(v *pageView) {
 		}
 		v.Servers = append(v.Servers, sv)
 	}
-}
-
-// sandboxed reports whether a server's command starts it in portcullis's
-// Docker sandbox.
-func sandboxed(cmd []string) bool {
-	if len(cmd) == 0 {
-		return false
-	}
-	p := filepath.ToSlash(cmd[0])
-	return filepath.Base(p) == "run.sh" && filepath.Base(filepath.Dir(p)) == "sandbox"
 }
 
 // toolView says what the policy does with calls to an offered tool.

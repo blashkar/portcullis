@@ -81,15 +81,15 @@ type session struct {
 	stderr *bytes.Buffer
 }
 
-// startWrapped runs "portcullis wrap -- <this test binary>" with the fake
-// server in the given mode.
+// startWrapped runs "portcullis wrap --unsandboxed -- <this test binary>"
+// with the fake server in the given mode.
 func startWrapped(t *testing.T, bin, mode string, flags ...string) *session {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := append([]string{"wrap"}, flags...)
+	args := append([]string{"wrap", "--unsandboxed"}, flags...)
 	args = append(args, "--", self, "-test.run=^$") // flags after "--" belong to the server
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), fakeServerEnv+"="+mode)
@@ -209,8 +209,17 @@ func TestWrap(t *testing.T) {
 		}
 	})
 
+	t.Run("refuses a server outside the sandbox", func(t *testing.T) {
+		cmd := exec.Command(bin, "wrap", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/")
+		out, _ := cmd.CombinedOutput()
+		if cmd.ProcessState.ExitCode() != exitError || !strings.Contains(string(out), "npx doesn't run in the sandbox") ||
+			!strings.Contains(string(out), "--unsandboxed") {
+			t.Errorf("exit %d, output %q", cmd.ProcessState.ExitCode(), out)
+		}
+	})
+
 	t.Run("reports a server that can't start", func(t *testing.T) {
-		cmd := exec.Command(bin, "wrap", "--", "/nonexistent/server")
+		cmd := exec.Command(bin, "wrap", "--unsandboxed", "--", "/nonexistent/server")
 		out, _ := cmd.CombinedOutput()
 		if cmd.ProcessState.ExitCode() != exitError || !strings.Contains(string(out), "starting /nonexistent/server") {
 			t.Errorf("exit %d, output %q", cmd.ProcessState.ExitCode(), out)

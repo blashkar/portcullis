@@ -43,7 +43,8 @@ func writeConfig(t *testing.T, servers ...string) (cfgPath, dbPath string) {
 	var b strings.Builder
 	b.WriteString("servers:\n")
 	for _, s := range servers {
-		fmt.Fprintf(&b, "  %s:\n    command: [%q, %q]\n", s, self, s)
+		// The fakes are this test binary, so they run outside the sandbox.
+		fmt.Fprintf(&b, "  %s:\n    command: [%q, %q]\n    unsandboxed: true\n", s, self, s)
 	}
 	b.WriteString("audit:\n  path: audit.db\n")
 	cfgPath = filepath.Join(dir, "portcullis.yaml")
@@ -338,7 +339,7 @@ func TestServeFailsIfAServerCantStart(t *testing.T) {
 	cfgPath, _ := writeConfig(t, "alpha")
 	// Add a server that doesn't exist.
 	data, _ := os.ReadFile(cfgPath)
-	data = []byte(strings.Replace(string(data), "servers:\n", "servers:\n  broken:\n    command: [/nonexistent/server]\n", 1))
+	data = []byte(strings.Replace(string(data), "servers:\n", "servers:\n  broken:\n    command: [/nonexistent/server]\n    unsandboxed: true\n", 1))
 	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -348,6 +349,32 @@ func TestServeFailsIfAServerCantStart(t *testing.T) {
 	out, _ := cmd.CombinedOutput()
 	if cmd.ProcessState.ExitCode() != exitError || !strings.Contains(string(out), "starting server broken") {
 		t.Errorf("exit %d, output:\n%s", cmd.ProcessState.ExitCode(), out)
+	}
+}
+
+func TestServeRefusesServersOutsideTheSandbox(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	bin := buildPortcullis(t)
+	cfgPath, _ := writeConfig(t, "alpha")
+	// A server added the way many setup guides show, without the sandbox.
+	data, _ := os.ReadFile(cfgPath)
+	data = []byte(strings.Replace(string(data), "servers:\n", "servers:\n  home:\n    command: [npx, -y, \"@modelcontextprotocol/server-filesystem\", /]\n", 1))
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "serve", "--config", cfgPath)
+	cmd.Env = append(os.Environ(), fakeMCPEnv+"=1")
+	out, _ := cmd.CombinedOutput()
+	if cmd.ProcessState.ExitCode() != exitError || !strings.Contains(string(out), "server home (npx -y") ||
+		!strings.Contains(string(out), "unsandboxed: true") {
+		t.Errorf("exit %d, output:\n%s", cmd.ProcessState.ExitCode(), out)
+	}
+	// Refused before anything starts: not even alpha, which is allowed.
+	if strings.Contains(string(out), "upstream connected") {
+		t.Errorf("a server started:\n%s", out)
 	}
 }
 

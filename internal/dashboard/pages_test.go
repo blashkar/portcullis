@@ -113,20 +113,6 @@ func TestServersPage(t *testing.T) {
 	}
 }
 
-func TestSandboxed(t *testing.T) {
-	for cmd, want := range map[string]bool{
-		"sandbox/run.sh": true, "../sandbox/run.sh": true, "/opt/portcullis/sandbox/run.sh": true,
-		"run.sh": false, "sandbox/evil.sh": false, "npx": false, "notsandbox/run.sh": false,
-	} {
-		if got := sandboxed([]string{cmd, "x"}); got != want {
-			t.Errorf("%s: %v", cmd, got)
-		}
-	}
-	if sandboxed(nil) {
-		t.Error("no command")
-	}
-}
-
 // fakeAudit is an audit log with fixed sessions.
 type fakeAudit struct {
 	sessions []audit.Session

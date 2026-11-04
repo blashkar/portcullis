@@ -2,6 +2,8 @@
 #
 # Each server runs in a locked-down Docker container (see sandbox/run.sh):
 # no host files, no network. Build the images first with `make sandbox`.
+# serve refuses a server whose command isn't sandbox/run.sh; one that must
+# run directly on this machine, with your access, needs unsandboxed: true.
 servers:
   fs:
     command: [sandbox/run.sh, filesystem]

@@ -76,6 +76,37 @@ type Server struct {
 	// Command is the program and its arguments. A program path containing a
 	// slash is relative to the config file; a bare name is looked up in PATH.
 	Command []string `yaml:"command"`
+	// Unsandboxed lets the server run without the Docker sandbox, directly
+	// on this machine with the access of the user running portcullis.
+	// Without it, serve refuses to start a server whose command isn't
+	// sandbox/run.sh.
+	Unsandboxed bool `yaml:"unsandboxed"`
+}
+
+// Sandboxed reports whether a server's command starts it in portcullis's
+// Docker sandbox, sandbox/run.sh. It goes by the command, not the
+// container: it catches a server added without the sandbox, not a script
+// that only pretends to be run.sh.
+func Sandboxed(cmd []string) bool {
+	if len(cmd) == 0 {
+		return false
+	}
+	p := filepath.ToSlash(cmd[0])
+	return filepath.Base(p) == "run.sh" && filepath.Base(filepath.Dir(p)) == "sandbox"
+}
+
+// CheckSandbox returns an error naming every server that would run outside
+// the sandbox without being marked unsandboxed.
+func (c *Config) CheckSandbox() error {
+	var errs []error
+	for _, name := range c.ServerNames() {
+		s := c.Servers[name]
+		if !s.Unsandboxed && !Sandboxed(s.Command) {
+			errs = append(errs, fmt.Errorf("server %s (%s) doesn't run in the sandbox: start it with sandbox/run.sh, "+
+				"or, if it must run directly on this machine with your access, set unsandboxed: true on it", name, strings.Join(s.Command, " ")))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Audit configures the audit log.
