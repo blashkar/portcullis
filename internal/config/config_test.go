@@ -303,3 +303,58 @@ func TestLoadPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxed(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		"sandbox/run.sh": true, "../sandbox/run.sh": true, "/opt/portcullis/sandbox/run.sh": true,
+		"run.sh": false, "sandbox/evil.sh": false, "npx": false, "notsandbox/run.sh": false,
+	} {
+		if got := Sandboxed([]string{cmd, "x"}); got != want {
+			t.Errorf("%s: %v", cmd, got)
+		}
+	}
+	if Sandboxed(nil) {
+		t.Error("no command")
+	}
+}
+
+func TestCheckSandbox(t *testing.T) {
+	cfg, err := Parse([]byte(`
+servers:
+  fs:
+    command: [sandbox/run.sh, filesystem]
+  home:
+    command: [npx, -y, "@modelcontextprotocol/server-filesystem", /Users/me]
+  local:
+    command: [./my-server]
+    unsandboxed: true
+  shell:
+    command: [sh, sandbox/run.sh, git]
+`), "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cfg.CheckSandbox()
+	if err == nil {
+		t.Fatal("servers outside the sandbox were allowed")
+	}
+	// Each server outside the sandbox is named, and how to fix it is said;
+	// the sandboxed one and the one marked unsandboxed aren't.
+	msg := err.Error()
+	for _, want := range []string{"server home (npx -y", "server shell (sh sandbox/run.sh git)", "unsandboxed: true"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error doesn't say %q: %s", want, msg)
+		}
+	}
+	for _, unwanted := range []string{"server fs", "server local"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("error names %q: %s", unwanted, msg)
+		}
+	}
+
+	delete(cfg.Servers, "home")
+	delete(cfg.Servers, "shell")
+	if err := cfg.CheckSandbox(); err != nil {
+		t.Errorf("sandboxed and explicitly unsandboxed servers: %v", err)
+	}
+}

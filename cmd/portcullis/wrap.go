@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/blashkar/portcullis/internal/config"
 	"github.com/blashkar/portcullis/internal/jsonrpc"
 	"github.com/blashkar/portcullis/internal/proxy"
 	"github.com/blashkar/portcullis/internal/transport"
@@ -22,6 +23,7 @@ type wrapOptions struct {
 	logPayloads    int
 	maxMessageSize int
 	grace          time.Duration
+	unsandboxed    bool
 }
 
 func newWrapCmd() *cobra.Command {
@@ -33,9 +35,13 @@ func newWrapCmd() *cobra.Command {
 between it and the client on portcullis's own stdin and stdout.
 
 Point your MCP client at portcullis instead of the server, and put the
-server's command after "--".`,
+server's command after "--".
+
+The server must run in the Docker sandbox, sandbox/run.sh. A server that
+runs directly on this machine has your access to it, so it needs
+--unsandboxed.`,
 		Example: `  portcullis wrap -- sandbox/run.sh filesystem
-  portcullis wrap --log-file portcullis.log -- ./my-server --verbose`,
+  portcullis wrap --log-file portcullis.log --unsandboxed -- ./my-server --verbose`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runWrap(cmd.Context(), opts, args)
@@ -50,10 +56,15 @@ server's command after "--".`,
 	f.IntVar(&opts.logPayloads, "log-payloads", 0, "log up to this many bytes of each message body (may include secrets)")
 	f.IntVar(&opts.maxMessageSize, "max-message-size", jsonrpc.DefaultMaxMessageSize, "largest message in bytes; bigger ones are dropped")
 	f.DurationVar(&opts.grace, "shutdown-grace", 5*time.Second, "how long the server gets to exit before each escalation (close stdin, SIGTERM, SIGKILL)")
+	f.BoolVar(&opts.unsandboxed, "unsandboxed", false, "allow a server that runs directly on this machine, outside the sandbox (sandbox/run.sh)")
 	return cmd
 }
 
 func runWrap(ctx context.Context, opts wrapOptions, args []string) error {
+	if !opts.unsandboxed && !config.Sandboxed(args) {
+		return fmt.Errorf("%s doesn't run in the sandbox: start the server with sandbox/run.sh, "+
+			"or, if it must run directly on this machine with your access, pass --unsandboxed", args[0])
+	}
 	logger, closeLog, err := newLogger(opts.logFile, opts.logLevel)
 	if err != nil {
 		return err

@@ -45,7 +45,7 @@ Or in any client's JSON config (`.mcp.json`, Claude Desktop, Cursor and others):
 }
 ```
 
-The client talks to portcullis as if it were the server. Everything after `--` is the real server's command, and its flags stay its own. portcullis works with any stdio server, but read the next section before running one directly on your machine.
+The client talks to portcullis as if it were the server. Everything after `--` is the real server's command, and its flags stay its own. portcullis works with any stdio server, but it only starts one outside the [sandbox](#sandboxed-mcp-servers) when you say so: read that section first.
 
 ## Demo: a malicious server
 
@@ -128,6 +128,7 @@ An MCP server runs with your permissions. Its "allowed directories" are a check 
 - **Locked down.** [`sandbox/run.sh`](sandbox/run.sh) runs each server with no network, a read-only root filesystem, no Linux capabilities, `no-new-privileges`, a non-root user, and memory, CPU and process limits. `--init` makes sure the container stops when portcullis stops the server.
 - **Only images built here run.** `run.sh` passes `--pull never`, so a missing image is an error rather than something fetched from a registry by name.
 - **The only link is stdio**, the stream portcullis inspects.
+- **Enforced, not just recommended.** `serve` and `wrap` refuse to start a server whose command isn't `sandbox/run.sh`, before starting anything. A server added the way many setup guides show, such as `npx @modelcontextprotocol/server-filesystem ~`, would let the model read your files, and write portcullis's own pin file or config, through ordinary tool calls. To run one directly on this machine anyway, say so for that server alone: `unsandboxed: true` on it in the config, or `--unsandboxed` for `wrap`. The dashboard flags such servers. The check goes by the command: it catches a server added without the sandbox, not a script that only pretends to be `run.sh`.
 
 [`sandbox/check.sh`](sandbox/check.sh) checks all of this from inside a running container: no mounts, no Docker socket, no network interface up but loopback, no connection to the host (Ollama), the Docker host by address on macOS or Linux, or the internet, not root, no capabilities, read-only root, and the container gone after SIGTERM. The connection probes are control-tested: the same probe in a container *with* a network connects. The demo server's image has no shell, so there the checks run through a small static binary, [`sandbox/probe`](sandbox/probe/main.go), whose tests show each check failing when the sandbox doesn't hold.
 

@@ -113,7 +113,8 @@ func TestAgentThroughProxy(t *testing.T) {
 	}
 	ollamaSrv := fakeOllama(t, `["completion","tools"]`)
 	logFile := filepath.Join(t.TempDir(), "proxy.log")
-	server := []string{"--", proxyBin, "wrap", "--log-file", logFile, "--", self, "-test.run=^$"}
+	// The fake server is this test binary, outside the sandbox.
+	server := []string{"--", proxyBin, "wrap", "--unsandboxed", "--log-file", logFile, "--", self, "-test.run=^$"}
 
 	t.Run("one-shot prompt", func(t *testing.T) {
 		stdout, stderr, err := runAgentBinary(t, agentBin, ollamaSrv.URL, "", append([]string{"-p", "read /w/a.txt"}, server...)...)
