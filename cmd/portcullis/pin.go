@@ -27,14 +27,19 @@ func newPinCmd() *cobra.Command {
 	var opts pinOptions
 	cmd := &cobra.Command{
 		Use:   "pin",
-		Short: "Review and approve tool definitions",
-		Long: `portcullis serve pins each tool's definition the first time it sees it. If a
-server later changes a tool's description or schema, the tool is held back
-until you review the change and approve it. These commands do that; a
-running serve picks up approvals within a few seconds.`,
+		Short: "Review and approve tool, prompt and resource definitions",
+		Long: `portcullis serve pins each tool's, prompt's and resource's definition the
+first time it sees it. If a server later changes one, such as a tool's
+description or schema, it is held back until you review the change and
+approve it. These commands do that; a running serve picks up approvals
+within a few seconds.
+
+Tools go by their names. Prompts go by prompt:<name> and resources by
+resource:<uri>.`,
 		Example: `  portcullis pin list
   portcullis pin diff fs__read_file
-  portcullis pin approve fs__read_file`,
+  portcullis pin approve fs__read_file
+  portcullis pin approve prompt:docs__summarize resource:notes://meeting`,
 	}
 	pf := cmd.PersistentFlags()
 	pf.StringVarP(&opts.configPath, "config", "c", "portcullis.yaml", "config file, used to find the pin file")
@@ -43,28 +48,28 @@ running serve picks up approvals within a few seconds.`,
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "list",
-			Short: "List pinned tools and changes waiting for approval",
+			Short: "List pinned definitions and changes waiting for approval",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				return runPinList(cmd.OutOrStdout(), opts)
 			},
 		},
 		&cobra.Command{
-			Use:   "diff [tool...]",
-			Short: "Show what changed in tools waiting for approval",
+			Use:   "diff [name...]",
+			Short: "Show what changed in definitions waiting for approval",
 			RunE: func(cmd *cobra.Command, args []string) error {
 				return runPinDiff(cmd.OutOrStdout(), opts, args)
 			},
 		},
 	)
 	approve := &cobra.Command{
-		Use:   "approve [tool...]",
-		Short: "Approve the current definitions of tools waiting for approval",
+		Use:   "approve [name...]",
+		Short: "Approve the definitions waiting for approval",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPinApprove(cmd.OutOrStdout(), opts, args)
 		},
 	}
-	approve.Flags().BoolVar(&opts.all, "all", false, "approve every tool waiting for approval")
+	approve.Flags().BoolVar(&opts.all, "all", false, "approve everything waiting for approval")
 	cmd.AddCommand(approve)
 	return cmd
 }
@@ -97,7 +102,7 @@ func runPinList(out io.Writer, opts pinOptions) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TOOL\tSTATUS\tAPPROVED\tCHANGE SEEN")
+	fmt.Fprintln(tw, "NAME\tSTATUS\tAPPROVED\tCHANGE SEEN")
 	for _, name := range slices.Sorted(maps.Keys(entries)) {
 		e := entries[name]
 		status, approved, seen := "approved", "-", "-"
@@ -162,10 +167,10 @@ func runPinDiff(out io.Writer, opts pinOptions, names []string) error {
 
 func runPinApprove(out io.Writer, opts pinOptions, names []string) error {
 	if len(names) == 0 && !opts.all {
-		return errors.New("name the tools to approve, or pass --all")
+		return errors.New("name what to approve, or pass --all")
 	}
 	if len(names) > 0 && opts.all {
-		return errors.New("name tools or pass --all, not both")
+		return errors.New("name what to approve or pass --all, not both")
 	}
 	store, err := openPins(opts)
 	if err != nil {

@@ -1,5 +1,7 @@
 // Package scan looks for tool poisoning: text in a tool's definition that
-// is aimed at the model rather than describing the tool.
+// is aimed at the model rather than describing the tool. Prompts and
+// resources are scanned the same way, since a client can show the model
+// their descriptions too.
 //
 // The model reads every tool's description, and the parameter descriptions
 // inside its schema, as trusted context. A malicious server can hide
@@ -108,12 +110,47 @@ func re(s string) *regexp.Regexp {
 // description that mentions one may be trying to change how the model uses
 // that tool ("shadowing").
 func Tool(t *mcp.Tool, others []string) []Finding {
+	return scanFields(textFields(t), t.Description, others)
+}
+
+// Prompt scans a prompt's definition: its title and description, and its
+// arguments' names, titles and descriptions. others are as for Tool.
+func Prompt(p *mcp.Prompt, others []string) []Finding {
+	fields := []field{{"title", p.Title}, {"description", p.Description}}
+	for i, a := range p.Arguments {
+		if a == nil {
+			continue
+		}
+		where := fmt.Sprintf("arguments[%d]", i)
+		fields = append(fields, field{where + ".name", a.Name}, field{where + ".title", a.Title}, field{where + ".description", a.Description})
+	}
+	return scanFields(fields, p.Description, others)
+}
+
+// Resource scans a resource's definition. Its title and description get
+// every check. Its name and URI are often a file's, and a server may
+// rightly offer a file called .env, so they are only checked for
+// invisible characters. others are as for Tool.
+func Resource(r *mcp.Resource, others []string) []Finding {
 	var out []Finding
-	for _, f := range textFields(t) {
+	for _, f := range []field{{"name", r.Name}, {"uri", r.URI}} {
+		if f, ok := invisible(f.where, f.text); ok {
+			out = append(out, f)
+		}
+	}
+	return append(out, scanFields([]field{{"title", r.Title}, {"description", r.Description}}, r.Description, others)...)
+}
+
+func scanFields(fields []field, description string, others []string) []Finding {
+	var out []Finding
+	for _, f := range fields {
+		if f.text == "" {
+			continue
+		}
 		out = append(out, scanText(f.where, f.text)...)
 		out = append(out, crossTool(f.where, f.text, others)...)
 	}
-	if n := utf8.RuneCountInString(t.Description); n > MaxDescription {
+	if n := utf8.RuneCountInString(description); n > MaxDescription {
 		out = append(out, Finding{Check: "long-description", Severity: Low, Where: "description", Match: fmt.Sprintf("%d characters", n)})
 	}
 	return out
