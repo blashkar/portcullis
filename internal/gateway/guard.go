@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -60,22 +61,61 @@ func noteFrom(ctx context.Context) *callNote {
 	return n
 }
 
-// toolCheck is the outcome of checking one tool's definition.
+// toolCheck is the outcome of checking one tool's, prompt's or resource's
+// definition.
 type toolCheck struct {
 	status   pin.Status // 0 without pinning
 	findings []scan.Finding
-	held     string // why the tool is held back; "" if it's offered
+	held     string // why it is held back; "" if it's offered
+}
+
+// offering is a tool, prompt or resource an upstream offers, to check.
+type offering struct {
+	def  pin.Definition        // as the client will see it
+	scan func() []scan.Finding // the scanner's findings
 }
 
 // checkTools pins and scans the tools an upstream offers, keyed by their
 // client-facing names. others are the other upstreams' tool names.
 func (g *Gateway) checkTools(upstream string, tools map[string]*mcp.Tool, others []string) (map[string]toolCheck, error) {
-	out := make(map[string]toolCheck, len(tools))
+	offered := make(map[string]offering, len(tools))
+	for name, t := range tools {
+		offered[name] = offering{def: pin.FromTool(t), scan: func() []scan.Finding { return scan.Tool(t, others) }}
+	}
+	return g.check(upstream, offered)
+}
+
+// checkPrompts pins and scans the prompts an upstream offers, keyed by
+// their client-facing names. The result is keyed by pin key.
+func (g *Gateway) checkPrompts(upstream string, prompts map[string]*mcp.Prompt, others []string) (map[string]toolCheck, error) {
+	offered := make(map[string]offering, len(prompts))
+	for _, p := range prompts {
+		def := pin.FromPrompt(p)
+		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Prompt(p, others) }}
+	}
+	return g.check(upstream, offered)
+}
+
+// checkResources pins and scans the resources an upstream offers, keyed by
+// URI. The result is keyed by pin key.
+func (g *Gateway) checkResources(upstream string, resources map[string]*mcp.Resource, others []string) (map[string]toolCheck, error) {
+	offered := make(map[string]offering, len(resources))
+	for _, r := range resources {
+		def := pin.FromResource(r)
+		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Resource(r, others) }}
+	}
+	return g.check(upstream, offered)
+}
+
+// check pins and scans what an upstream offers, keyed by pin key, and says
+// which of it to hold back.
+func (g *Gateway) check(upstream string, offered map[string]offering) (map[string]toolCheck, error) {
+	out := make(map[string]toolCheck, len(offered))
 	var statuses map[string]pin.Status
 	if g.opts.Pins != nil {
-		defs := make(map[string]pin.Definition, len(tools))
-		for name, t := range tools {
-			defs[name] = pin.FromTool(t)
+		defs := make(map[string]pin.Definition, len(offered))
+		for key, o := range offered {
+			defs[key] = o.def
 		}
 		var err error
 		if statuses, err = g.opts.Pins.Check(defs); err != nil {
@@ -83,21 +123,22 @@ func (g *Gateway) checkTools(upstream string, tools map[string]*mcp.Tool, others
 		}
 	}
 	sc := g.opts.Scan
-	for name, t := range tools {
-		c := toolCheck{status: statuses[name]}
-		if sc.Enabled && !sc.Ignore.Match(name) {
-			c.findings = scan.Tool(t, others)
+	for key, o := range offered {
+		c := toolCheck{status: statuses[key]}
+		if sc.Enabled && !sc.Ignore.Match(key) {
+			c.findings = o.scan()
 		}
+		review := "review it with `portcullis pin diff " + key + "` and approve it with `portcullis pin approve " + key + "`"
 		switch {
 		case c.status == pin.Changed:
-			c.held = "its definition changed since it was approved; review it with `portcullis pin diff " + name + "` and approve it with `portcullis pin approve " + name + "`"
+			c.held = "its definition changed since it was approved; " + review
 		case c.status == pin.New:
-			c.held = "it is new and hasn't been approved; review it with `portcullis pin diff " + name + "` and approve it with `portcullis pin approve " + name + "`"
+			c.held = "it is new and hasn't been approved; " + review
 		case sc.Hide && scan.Max(c.findings) == scan.High:
 			c.held = "its definition looks like tool poisoning (" + firstHigh(c.findings).String() + "); if you trust it, add it to scan.ignore in the config"
 		}
-		g.reportTool(upstream, name, pin.FromTool(t), c)
-		out[name] = c
+		g.reportTool(upstream, key, o.def, c)
+		out[key] = c
 	}
 	return out, nil
 }
@@ -111,8 +152,10 @@ func firstHigh(fs []scan.Finding) scan.Finding {
 	return scan.Finding{}
 }
 
-// reportTool logs and records what checking a tool found, once per
-// definition: a server re-listing its tools doesn't repeat the report.
+// reportTool logs and records what checking a tool, prompt or resource
+// found, once per definition: a server re-listing them doesn't repeat the
+// report. Prompts and resources are reported with the same methods as
+// tools, under their pin keys.
 func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCheck) {
 	var method string
 	switch {
@@ -147,7 +190,7 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 	if method != "tool/pinned" && (g.opts.Recorder != nil || g.opts.Observer != nil) {
 		e.Params = marshal(def)
 	}
-	attrs := []any{"upstream", upstream, "tool", name}
+	attrs := []any{"upstream", upstream, pin.KindOf(name), name}
 	if c.held != "" {
 		attrs = append(attrs, "reason", c.held)
 	}
@@ -156,36 +199,52 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 	}
 	switch {
 	case c.held != "":
-		g.log.Warn("tool held back", attrs...)
+		g.log.Warn(pin.KindOf(name)+" held back", attrs...)
 	case method == "tool/flagged":
-		g.log.Warn("tool definition flagged", attrs...)
+		g.log.Warn(pin.KindOf(name)+" definition flagged", attrs...)
 	default:
-		g.log.Info("tool pinned", attrs...)
+		g.log.Info(pin.KindOf(name)+" pinned", attrs...)
 	}
 	g.record(context.Background(), e, Details{})
 }
 
-// guard is receiving middleware that refuses calls to held tools, with an
-// error saying why, rather than the SDK's bare "unknown tool".
+// guard is receiving middleware that refuses to call held tools, get held
+// prompts and read held resources, with an error saying why, rather than
+// the SDK's bare "unknown tool".
 func (g *Gateway) guard(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		if p, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok && method == "tools/call" {
-			if reason := g.heldReason(p.Name); reason != "" {
-				if n := noteFrom(ctx); n != nil {
-					n.held = reason
-				}
-				data, _ := json.Marshal(map[string]string{"reason": reason})
-				return nil, &jsonrpc.Error{
-					Code:    CodeToolHeld,
-					Message: fmt.Sprintf("portcullis: %s is held back: %s", p.Name, reason),
-					Data:    data,
-				}
+		var key string
+		switch p := req.GetParams().(type) {
+		case *mcp.CallToolParamsRaw:
+			if method == "tools/call" {
+				key = p.Name
+			}
+		case *mcp.GetPromptParams:
+			if method == "prompts/get" {
+				key = pin.FromPrompt(&mcp.Prompt{Name: p.Name}).Key()
+			}
+		case *mcp.ReadResourceParams:
+			if method == "resources/read" {
+				key = pin.FromResource(&mcp.Resource{URI: p.URI}).Key()
+			}
+		}
+		if reason := g.heldReason(key); key != "" && reason != "" {
+			if n := noteFrom(ctx); n != nil {
+				n.held = reason
+			}
+			data, _ := json.Marshal(map[string]string{"reason": reason})
+			return nil, &jsonrpc.Error{
+				Code:    CodeToolHeld,
+				Message: fmt.Sprintf("portcullis: %s is held back: %s", key, reason),
+				Data:    data,
 			}
 		}
 		return next(ctx, method, req)
 	}
 }
 
+// heldReason says why the tool, prompt or resource with pin key name is
+// held back, or returns "" if it isn't.
 func (g *Gateway) heldReason(name string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -197,7 +256,8 @@ func (g *Gateway) heldReason(name string) string {
 	return ""
 }
 
-// Held returns the tools being held back, with the reasons.
+// Held returns the tools, prompts and resources being held back, by pin
+// key, with the reasons.
 func (g *Gateway) Held() map[string]string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -227,8 +287,9 @@ func (g *Gateway) otherToolNames(upstream string) []string {
 	return out
 }
 
-// Resync fetches every upstream's tools again and rechecks them. serve calls
-// it once all upstreams are connected, so the cross-tool check sees them all.
+// Resync fetches every upstream's tools, prompts and resources again and
+// rechecks them. serve calls it once all upstreams are connected, so the
+// cross-tool check sees them all.
 func (g *Gateway) Resync(ctx context.Context) {
 	g.mu.Lock()
 	var us []*upstream
@@ -237,13 +298,13 @@ func (g *Gateway) Resync(ctx context.Context) {
 	}
 	g.mu.Unlock()
 	for _, u := range us {
-		if err := g.syncTools(ctx, u); err != nil {
-			g.log.Warn("refreshing upstream tools", "upstream", u.name, "err", err)
+		if err := errors.Join(g.syncTools(ctx, u), g.syncPrompts(ctx, u), g.syncResources(ctx, u)); err != nil {
+			g.log.Warn("refreshing upstream lists", "upstream", u.name, "err", err)
 		}
 	}
 }
 
-// watchPins resyncs when the pin file changes, so a tool approved with
+// watchPins resyncs when the pin file changes, so anything approved with
 // "portcullis pin approve" while serve runs is offered without a restart.
 func (g *Gateway) watchPins(ctx context.Context) {
 	if g.opts.Pins == nil {

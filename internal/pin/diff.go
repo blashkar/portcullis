@@ -6,7 +6,7 @@ import (
 )
 
 // Lines renders a definition as lines of text for review: the description
-// line by line, the schemas as indented JSON.
+// line by line, the schemas and a prompt's arguments as indented JSON.
 func (d Definition) Lines() []string {
 	var out []string
 	add := func(name string, v any) {
@@ -20,7 +20,13 @@ func (d Definition) Lines() []string {
 		out = append(out, name+":")
 		out = append(out, strings.Split("  "+string(b), "\n")...)
 	}
+	if d.Kind != "" {
+		out = append(out, "kind: "+d.Kind)
+	}
 	out = append(out, "name: "+d.Name)
+	if d.URI != "" {
+		out = append(out, "uri: "+d.URI)
+	}
 	if d.Title != "" {
 		out = append(out, "title: "+d.Title)
 	}
@@ -29,6 +35,12 @@ func (d Definition) Lines() []string {
 		for line := range strings.Lines(d.Description) {
 			out = append(out, "  "+strings.TrimRight(line, "\r\n"))
 		}
+	}
+	if d.MIMEType != "" {
+		out = append(out, "mimeType: "+d.MIMEType)
+	}
+	if len(d.Arguments) > 0 {
+		add("arguments", d.Arguments)
 	}
 	add("inputSchema", d.InputSchema)
 	add("outputSchema", d.OutputSchema)

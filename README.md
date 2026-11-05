@@ -314,15 +314,17 @@ Limits: anything running as your user can read `portcullis.dashboard`, as it can
 
 The policy controls what the agent asks servers to do. These checks cover the other direction, what servers tell the agent. All of them are on by default except the guard model, which needs Ollama.
 
-### Tool pinning (rug pulls)
+### Pinning tools, prompts and resources (rug pulls)
 
 The first time portcullis sees a tool, it records the tool's definition (description, title, schemas and annotations) in `portcullis.pins.json`. If a server later changes a tool, the tool is held back: it disappears from the client's tool list, and calls to it get an error (code `-32031`) explaining why and what to run. The change is recorded in the audit log as `tool/changed`.
+
+Prompts and resources are pinned the same way, since a client can show the model their descriptions too. A server could offer a harmless `summarize` prompt, then change it to ask the user for a GitHub token in a new argument. In the pin file and the `portcullis pin` commands, a prompt goes by `prompt:<name>`, such as `prompt:docs__summarize`, and a resource by `resource:<uri>`, such as `resource:notes://meeting`. A held prompt fails `prompts/get` and a held resource fails `resources/read`, both with the same error code. They're recorded with the same `tool/...` audit methods, under those names.
 
 You review and approve changes with `portcullis pin`, and a running `serve` picks up the approval within a couple of seconds:
 
 ```text
 $ portcullis pin list
-TOOL                 STATUS            APPROVED             CHANGE SEEN
+NAME                 STATUS            APPROVED             CHANGE SEEN
 git__git_log         changed: waiting  2026-10-25 11:23:08  2026-10-25 11:24:38
 ...
 $ portcullis pin diff
@@ -341,13 +343,13 @@ approved git__git_log
 
 That run was set up by hand: the git server never changed its tool, so I edited the pin file to make the approved description older. Everything after that is real output.
 
-- **`pins.new_tools: hold`** holds new tools too, so nothing is offered until you approve it. The default, `pin`, trusts a tool the first time it's seen.
+- **`pins.new_tools: hold`** holds new tools, prompts and resources too, so nothing is offered until you approve it. The default, `pin`, trusts each one the first time it's seen.
 - **Commit the pin file** with your config if you like. It's plain JSON, sorted, and written atomically under a file lock, so `serve` and `portcullis pin` can both update it at once.
-- **What's pinned** is what the model reads: the description, title, input and output schemas, and annotations like `readOnlyHint`, since flipping one of those changes how a client treats the tool. Icons and `_meta` aren't pinned.
+- **What's pinned** is what the model reads. For a tool, that's the description, title, input and output schemas, and annotations like `readOnlyHint`, since flipping one of those changes how a client treats the tool. For a prompt, it's the name, title, description and arguments. For a resource, it's the URI, name, title, description and MIME type; its size and annotations aren't pinned, because they change with its contents. Icons and `_meta` aren't pinned for any of them.
 
 ### Tool-poisoning scanner
 
-Before a tool is offered, portcullis scans its description, title, and every string and property name in its schemas. A malicious server can hide instructions to the model in a parameter's description just as easily as in the tool's. It looks for:
+Before a tool is offered, portcullis scans its description, title, and every string and property name in its schemas. A malicious server can hide instructions to the model in a parameter's description just as easily as in the tool's. Prompts get the same scan over their title, description and arguments. Resources get it over their title and description; their name and URI are often a file's, and a server may rightly offer a file called `.env`, so those are only checked for invisible characters. It looks for:
 
 | Check | Example | Severity |
 |---|---|---|
@@ -360,7 +362,7 @@ Before a tool is offered, portcullis scans its description, title, and every str
 | `encoded-blob` | a long base64 or hex run | medium |
 | `long-description` | over 2,000 characters | low |
 
-With `scan.tools: hide` (the default), a tool with a high-severity finding is held back; lower ones are logged and recorded as `tool/flagged`. Use `log` to only report, and `scan.ignore` for tools you've reviewed. Invisible characters are removed before the patterns run, so they can't be used to split up a phrase.
+With `scan.tools: hide` (the default), a tool, prompt or resource with a high-severity finding is held back; lower ones are logged and recorded as `tool/flagged`. Use `log` to only report, and `scan.ignore` for ones you've reviewed, such as `fs__*`, `prompt:docs__*` or `resource:notes://*`. Invisible characters are removed before the patterns run, so they can't be used to split up a phrase.
 
 These are heuristics, tuned against the reference servers: the scanner's tests check every tool of the filesystem, git and everything servers (captured from the sandbox), and the only finding is a medium one on `everything__get-env`, whose description does say it returns environment variables.
 

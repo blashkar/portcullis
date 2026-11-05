@@ -16,21 +16,24 @@ audit:
   path: portcullis.db       # relative to this file; created with mode 0600
   max_payload: 65536        # bytes of each message's params and result to keep
 
-# Tool pinning: each tool's definition is recorded the first time it's
-# seen. If a server later changes a tool (a "rug pull"), the tool is held
-# back until you review and approve it with `portcullis pin diff` and
-# `portcullis pin approve`.
+# Pinning: each tool's, prompt's and resource's definition is recorded the
+# first time it's seen. If a server later changes one (a "rug pull"), it is
+# held back until you review and approve it with `portcullis pin diff` and
+# `portcullis pin approve`. Prompts and resources are pinned as
+# prompt:<name> and resource:<uri>.
 pins:
   path: portcullis.pins.json   # relative to this file; worth committing
-  new_tools: pin               # pin: trust on first use; hold: approve each new tool too
+  new_tools: pin               # pin: trust on first use; hold: approve each new tool, prompt and resource too
 
 # The tool-poisoning scanner reads every tool's description and schema
 # for text aimed at the model: hidden instructions, mentions of SSH keys
-# or .env files, invisible Unicode. A tool with a high-severity finding
-# is hidden (hide), or only reported (log); off skips scanning.
+# or .env files, invisible Unicode. Prompts (description and arguments)
+# and resources (title and description) are scanned too. Anything with a
+# high-severity finding is hidden (hide), or only reported (log); off
+# skips scanning.
 scan:
   tools: hide
-  ignore: []                   # tool patterns you've reviewed and trust
+  ignore: []                   # patterns you've reviewed and trust: fs__*, prompt:fs__*, resource:notes://*
 
 # Secrets in tool results, resources and prompts (API keys, tokens,
 # private keys, passwords in URLs) are replaced with [REDACTED:kind]

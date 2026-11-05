@@ -8,8 +8,9 @@
 // Before a tool call is forwarded, the policy, if there is one, decides
 // whether it may go ahead.
 //
-// Tools are checked before they are offered: a tool whose definition
-// changed since it was pinned, or that looks poisoned, is held back. Secrets
+// Tools, prompts and resources are checked before they are offered: one
+// whose definition changed since it was pinned, or that looks poisoned, is
+// held back. Secrets
 // in tool results, resources and prompts are redacted on the way back, and
 // results are checked for prompt injection.
 //
@@ -106,7 +107,7 @@ type upstream struct {
 	// syncMu serializes refreshes of this upstream's lists.
 	syncMu    sync.Mutex
 	tools     map[string]bool   // client-facing names of the tools offered
-	held      map[string]string // tools held back, with the reason
+	held      map[string]string // tools, prompts and resources held back, by pin key, with the reason
 	names     []string          // every tool's name as the server gives it
 	prompts   map[string]bool
 	resources map[string]bool // URIs
@@ -243,7 +244,7 @@ type ServerInfo struct {
 	Name      string
 	Connected bool
 	Tools     []string          // client-facing names of the tools offered, sorted
-	Held      map[string]string // tools held back, with the reason
+	Held      map[string]string // tools, prompts and resources held back, by pin key, with the reason
 }
 
 // Servers describes the upstream servers, sorted by name.
@@ -344,9 +345,24 @@ func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
 	}
 	g.server.RemoveTools(stale(u.tools, seen)...)
 	g.mu.Lock()
-	u.tools, u.held = seen, held
+	u.tools = seen
+	g.setHeld(u, "tool", held)
 	g.mu.Unlock()
 	return nil
+}
+
+// setHeld replaces the upstream's held definitions of one kind ("tool",
+// pin.KindPrompt or pin.KindResource). g.mu must be held.
+func (g *Gateway) setHeld(u *upstream, kind string, held map[string]string) {
+	if u.held == nil {
+		u.held = map[string]string{}
+	}
+	for key := range u.held {
+		if pin.KindOf(key) == kind {
+			delete(u.held, key)
+		}
+	}
+	maps.Copy(u.held, held)
 }
 
 func (g *Gateway) toolHandler(upstream, tool string) mcp.ToolHandler {
@@ -503,13 +519,28 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 	if !full {
 		g.tooLong(u.name, "prompts")
 	}
-	seen := map[string]bool{}
+	offered := map[string]*mcp.Prompt{}
+	originals := map[string]string{}
 	for _, p := range prompts {
-		name := prefixed(u.name, p.Name)
 		fp := *p
-		fp.Name = name
-		original := p.Name
-		g.server.AddPrompt(&fp, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		fp.Name = prefixed(u.name, p.Name)
+		offered[fp.Name] = &fp
+		originals[fp.Name] = p.Name
+	}
+	checks, err := g.checkPrompts(u.name, offered, g.otherToolNames(u.name))
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	held := map[string]string{}
+	for name, fp := range offered {
+		key := pin.FromPrompt(fp).Key()
+		if r := checks[key].held; r != "" {
+			held[key] = r
+			continue
+		}
+		original := originals[name]
+		g.server.AddPrompt(fp, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 			s, err := g.session(u.name)
 			if err != nil {
 				return nil, err
@@ -530,6 +561,7 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 	g.server.RemovePrompts(stale(u.prompts, seen)...)
 	g.mu.Lock()
 	u.prompts = seen
+	g.setHeld(u, pin.KindPrompt, held)
 	g.mu.Unlock()
 	return nil
 }
@@ -552,32 +584,61 @@ func (g *Gateway) syncResources(ctx context.Context, u *upstream) error {
 	if !full {
 		g.tooLong(u.name, "resources")
 	}
-	seen := map[string]bool{}
+	// URIs aren't namespaced, so the first server to offer one keeps it.
+	offered := map[string]*mcp.Resource{}
 	for _, r := range resources {
 		g.mu.Lock()
 		owner, taken := g.resources[r.URI]
-		if !taken {
-			g.resources[r.URI] = u.name
-		}
 		g.mu.Unlock()
 		if taken && owner != u.name {
-			// URIs aren't namespaced, so the first server to offer one keeps it.
 			g.log.Warn("skipping resource another server already offers", "upstream", u.name, "uri", r.URI, "owner", owner)
 			continue
 		}
-		if err := addResource(g.server, r, g.resourceHandler(u.name)); err != nil {
-			g.log.Warn("skipping resource", "upstream", u.name, "uri", r.URI, "err", err)
+		offered[r.URI] = r
+	}
+	checks, err := g.checkResources(u.name, offered, g.otherToolNames(u.name))
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	held := map[string]string{}
+	for uri, r := range offered {
+		key := pin.FromResource(r).Key()
+		if reason := checks[key].held; reason != "" {
+			held[key] = reason
 			continue
 		}
-		seen[r.URI] = true
+		g.mu.Lock()
+		owner, taken := g.resources[uri]
+		if !taken {
+			g.resources[uri] = u.name
+		}
+		g.mu.Unlock()
+		if taken && owner != u.name {
+			g.log.Warn("skipping resource another server already offers", "upstream", u.name, "uri", uri, "owner", owner)
+			continue
+		}
+		if err := addResource(g.server, r, g.resourceHandler(u.name)); err != nil {
+			g.log.Warn("skipping resource", "upstream", u.name, "uri", uri, "err", err)
+			if !taken {
+				g.mu.Lock()
+				delete(g.resources, uri)
+				g.mu.Unlock()
+			}
+			continue
+		}
+		seen[uri] = true
 	}
 	gone := stale(u.resources, seen)
 	g.server.RemoveResources(gone...)
 	g.mu.Lock()
 	for _, uri := range gone {
-		delete(g.resources, uri)
+		if g.resources[uri] == u.name {
+			delete(g.resources, uri)
+		}
 	}
 	u.resources = seen
+	g.setHeld(u, pin.KindResource, held)
 	g.mu.Unlock()
 	return nil
 }
