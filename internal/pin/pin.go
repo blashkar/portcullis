@@ -1,11 +1,13 @@
-// Package pin detects rug pulls: an MCP server changing a tool's definition
-// after it was trusted.
+// Package pin detects rug pulls: an MCP server changing a tool's, prompt's
+// or resource's definition after it was trusted.
 //
 // A server can behave for a while and then swap a tool's description for
 // one carrying instructions to the model, or widen its schema. The model
-// reads the new definition with no sign anything changed. A Store keeps the
-// approved definition of every tool in a JSON file; a tool whose definition
-// no longer matches is held back until a person approves the change.
+// reads the new definition with no sign anything changed. Prompts and
+// resources have descriptions the client may show the model too. A Store
+// keeps the approved definition of each of them in a JSON file; one whose
+// definition no longer matches is held back until a person approves the
+// change.
 //
 // The file is meant to be read and diffed, and can be committed alongside
 // the config, like a lockfile.
@@ -30,15 +32,30 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Definition is the part of a tool that the model sees and a pin covers.
-// Icons and _meta are left out: they don't change what the model is told.
+// Kinds of definition, other than tools.
+const (
+	KindPrompt   = "prompt"
+	KindResource = "resource"
+)
+
+// Definition is the part of a tool, prompt or resource that the model sees
+// and a pin covers. Icons and _meta are left out: they don't change what
+// the model is told. Neither are a resource's size and annotations, which
+// change with its contents.
+//
+// Fields a tool doesn't have are omitted from its JSON, so a tool's hash is
+// what it was before prompts and resources were pinned.
 type Definition struct {
-	Name         string               `json:"name"`
-	Title        string               `json:"title,omitempty"`
-	Description  string               `json:"description,omitempty"`
-	InputSchema  any                  `json:"inputSchema,omitempty"`
-	OutputSchema any                  `json:"outputSchema,omitempty"`
-	Annotations  *mcp.ToolAnnotations `json:"annotations,omitempty"`
+	Kind         string                `json:"kind,omitempty"` // "" for a tool
+	Name         string                `json:"name"`
+	URI          string                `json:"uri,omitempty"`
+	Title        string                `json:"title,omitempty"`
+	Description  string                `json:"description,omitempty"`
+	MIMEType     string                `json:"mimeType,omitempty"`
+	Arguments    []*mcp.PromptArgument `json:"arguments,omitempty"`
+	InputSchema  any                   `json:"inputSchema,omitempty"`
+	OutputSchema any                   `json:"outputSchema,omitempty"`
+	Annotations  *mcp.ToolAnnotations  `json:"annotations,omitempty"`
 }
 
 // FromTool returns a tool's definition, as the server named it.
@@ -49,22 +66,60 @@ func FromTool(t *mcp.Tool) Definition {
 	}
 }
 
+// FromPrompt returns a prompt's definition.
+func FromPrompt(p *mcp.Prompt) Definition {
+	return Definition{Kind: KindPrompt, Name: p.Name, Title: p.Title, Description: p.Description, Arguments: p.Arguments}
+}
+
+// FromResource returns a resource's definition.
+func FromResource(r *mcp.Resource) Definition {
+	return Definition{
+		Kind: KindResource, Name: r.Name, URI: r.URI, Title: r.Title,
+		Description: r.Description, MIMEType: r.MIMEType,
+	}
+}
+
+// Key is the name a definition is pinned under: a tool's name, or for a
+// prompt or a resource its name or URI after "prompt:" or "resource:".
+// Tool names start with their server's name, which can't contain a colon,
+// so the three never collide.
+func (d Definition) Key() string {
+	switch d.Kind {
+	case KindPrompt:
+		return KindPrompt + ":" + d.Name
+	case KindResource:
+		return KindResource + ":" + d.URI
+	}
+	return d.Name
+}
+
+// KindOf returns the kind of definition pinned under key: "tool",
+// KindPrompt or KindResource.
+func KindOf(key string) string {
+	for _, k := range []string{KindPrompt, KindResource} {
+		if strings.HasPrefix(key, k+":") {
+			return k
+		}
+	}
+	return "tool"
+}
+
 // Hash returns a hash of the definition. JSON objects are encoded with
 // sorted keys, so the same definition always hashes the same.
 func (d Definition) Hash() string {
 	b, err := json.Marshal(d)
 	if err != nil {
 		// Schemas come from JSON, so they always encode.
-		panic(fmt.Sprintf("pin: encoding a tool definition: %v", err))
+		panic(fmt.Sprintf("pin: encoding a definition: %v", err))
 	}
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Entry is one tool's record in the pin file.
+// Entry is one tool's, prompt's or resource's record in the pin file.
 type Entry struct {
 	// Hash and Definition are the approved definition; both are empty if
-	// the tool has never been approved.
+	// it has never been approved.
 	Hash       string      `json:"hash,omitempty"`
 	Definition *Definition `json:"definition,omitempty"`
 	Approved   time.Time   `json:"approved,omitzero"`
@@ -79,7 +134,7 @@ type Pending struct {
 	Seen       time.Time  `json:"seen"`
 }
 
-// Status is how a tool's current definition compares with its pin.
+// Status is how a current definition compares with its pin.
 type Status int
 
 // Statuses.
@@ -94,11 +149,13 @@ func (s Status) String() string {
 	return [...]string{"", "approved", "pinned", "changed", "new"}[s]
 }
 
-// Held reports whether a tool in this state must not be offered.
+// Held reports whether a definition in this state must not be offered.
 func (s Status) Held() bool {
 	return s == Changed || s == New
 }
 
+// file is the pin file. Tools holds prompts and resources too, under their
+// keys, so pin files written before those were pinned still read.
 type file struct {
 	Version int               `json:"version"`
 	Tools   map[string]*Entry `json:"tools"`
@@ -119,8 +176,8 @@ type Store struct {
 }
 
 // Open returns the Store for the pin file at path, which needn't exist
-// yet. If holdNew is set, tools never seen before are held for approval
-// instead of being pinned on first sight.
+// yet. If holdNew is set, definitions never seen before are held for
+// approval instead of being pinned on first sight.
 func Open(path string, holdNew bool) *Store {
 	// Until the Store reads the file, compare with a missing one.
 	return &Store{path: path, holdNew: holdNew, now: time.Now, sum: sha256.Sum256(nil)}
@@ -131,9 +188,9 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// Check compares the definitions a server offers, keyed by client-facing
-// tool name, with the pinned ones. New tools are pinned (or held), and a
-// changed definition is recorded as pending so it can be reviewed.
+// Check compares the definitions a server offers, keyed by Key, with the
+// pinned ones. New definitions are pinned (or held), and a changed one is
+// recorded as pending so it can be reviewed.
 func (s *Store) Check(defs map[string]Definition) (map[string]Status, error) {
 	out := make(map[string]Status, len(defs))
 	err := s.update(func(f *file) bool {
@@ -174,9 +231,9 @@ func (s *Store) Check(defs map[string]Definition) (map[string]Status, error) {
 	return out, err
 }
 
-// Approve approves the pending definitions of the named tools, or of every
-// tool with one if names is empty. It returns the tools it approved, and
-// an error naming any named tool that had nothing to approve.
+// Approve approves the pending definitions under the named keys, or every
+// pending definition if names is empty. It returns the keys it approved,
+// and an error naming any named key that had nothing to approve.
 func (s *Store) Approve(names []string) ([]string, error) {
 	explicit := len(names) > 0
 	var approved, nothing []string
@@ -208,7 +265,7 @@ func (s *Store) Approve(names []string) ([]string, error) {
 	return approved, nil
 }
 
-// ApproveHash approves a tool's pending definition only if its hash is
+// ApproveHash approves a key's pending definition only if its hash is
 // hash: the definition a person looked at, not one the server offered
 // since. It reports whether it approved anything.
 func (s *Store) ApproveHash(name, hash string) (bool, error) {
@@ -226,7 +283,7 @@ func (s *Store) ApproveHash(name, hash string) (bool, error) {
 	return ok, err
 }
 
-// Entries returns every tool's entry.
+// Entries returns every entry, by key.
 func (s *Store) Entries() (map[string]*Entry, error) {
 	var out map[string]*Entry
 	err := s.update(func(f *file) bool {
@@ -237,7 +294,7 @@ func (s *Store) Entries() (map[string]*Entry, error) {
 }
 
 // Modified reports whether the file has changed since this Store last read
-// or wrote it, as it does when another process approves a tool.
+// or wrote it, as it does when another process approves a change.
 func (s *Store) Modified() bool {
 	data, err := os.ReadFile(s.path)
 	if err != nil {

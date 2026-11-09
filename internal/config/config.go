@@ -120,23 +120,26 @@ type Audit struct {
 	MaxPayload int `yaml:"max_payload"`
 }
 
-// Pins configures tool pinning: holding back a tool whose definition
-// changed since it was approved.
+// Pins configures pinning: holding back a tool, prompt or resource whose
+// definition changed since it was approved.
 type Pins struct {
 	// Path is the pin file; "" means DefaultPinsPath.
 	Path     string `yaml:"path"`
 	Disabled bool   `yaml:"disabled"`
-	// NewTools is what happens to a tool seen for the first time: "pin"
-	// (the default) trusts it and pins it; "hold" holds it until approved.
+	// NewTools is what happens to a tool, prompt or resource seen for the
+	// first time: "pin" (the default) trusts it and pins it; "hold" holds
+	// it until approved.
 	NewTools string `yaml:"new_tools"`
 }
 
 // Scan configures the tool-poisoning scanner.
 type Scan struct {
-	// Tools is what happens to a tool whose definition has a high-severity
-	// finding: "hide" (the default), "log", or "off" to skip scanning.
+	// Tools is what happens to a tool, prompt or resource whose definition
+	// has a high-severity finding: "hide" (the default), "log", or "off" to
+	// skip scanning.
 	Tools string `yaml:"tools"`
-	// Ignore lists tool patterns not to scan, for tools you have reviewed.
+	// Ignore lists patterns not to scan, for ones you have reviewed: tool
+	// names, prompt:<name> or resource:<uri>.
 	Ignore []string `yaml:"ignore"`
 }
 

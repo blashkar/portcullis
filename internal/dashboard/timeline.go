@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blashkar/portcullis/internal/audit"
+	"github.com/blashkar/portcullis/internal/pin"
 )
 
 // Tones color stages and verdicts: ok went through, bad was stopped, warn
@@ -78,34 +79,37 @@ func tell(e Event) story {
 	case "tools/call", "prompts/get", "resources/read":
 		return tellCall(e)
 	case "tool/changed":
+		kind := pin.KindOf(e.Tool)
 		return story{
 			title: e.Tool,
 			stages: []stage{
-				{"server", "changed the tool", toneWarn},
+				{"server", "changed the " + kind, toneWarn},
 				{"portcullis", "held it", toneBad},
 				{"agent", "not offered", toneMute},
 			},
 			verdict: "Rug pull held", tone: toneBad, caught: true,
-			by: "tool pinning", outcome: "tool held until you approve the change",
-			explain: "The server changed this tool after it was approved. It is held back until you review the change.",
+			by: "pinning", outcome: kind + " held until you approve the change",
+			explain: "The server changed this " + kind + " after it was approved. It is held back until you review the change.",
 		}
 	case "tool/held":
-		by := "tool pinning"
+		kind := pin.KindOf(e.Tool)
+		by := "pinning"
 		if strings.Contains(e.Reason, "poison") {
 			by = "the tool-poisoning scanner"
 		}
 		return story{
-			by: by, outcome: "tool hidden from the agent",
+			by: by, outcome: kind + " hidden from the agent",
 			title: e.Tool,
 			stages: []stage{
 				{"server", "offered it", toneMute},
 				{"portcullis", "held it back", toneBad},
 				{"agent", "not offered", toneMute},
 			},
-			verdict: "Tool held back", tone: toneBad, caught: true,
-			explain: "The agent isn't offered this tool. " + sentence(e.Reason),
+			verdict: capitalize(kind) + " held back", tone: toneBad, caught: true,
+			explain: "The agent isn't offered this " + kind + ". " + sentence(e.Reason),
 		}
 	case "tool/flagged":
+		kind := pin.KindOf(e.Tool)
 		return story{
 			title: e.Tool,
 			stages: []stage{
@@ -113,9 +117,9 @@ func tell(e Event) story {
 				{"portcullis", "flagged it", toneWarn},
 				{"agent", "offered", toneOK},
 			},
-			verdict: "Tool flagged", tone: toneWarn, caught: true,
-			by: "the tool-poisoning scanner", outcome: "tool still offered",
-			explain: "The scanner noticed something in this tool's definition, not enough to hide it.",
+			verdict: capitalize(kind) + " flagged", tone: toneWarn, caught: true,
+			by: "the tool-poisoning scanner", outcome: kind + " still offered",
+			explain: "The scanner noticed something in this " + kind + "'s definition, not enough to hide it.",
 		}
 	case "upstream/disconnected":
 		return story{
@@ -394,4 +398,12 @@ func parseEvent(s string) int64 {
 		return 0
 	}
 	return n
+}
+
+// capitalize upper-cases the first letter of an ASCII word.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

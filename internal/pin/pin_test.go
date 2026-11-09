@@ -292,3 +292,68 @@ func TestApproveHash(t *testing.T) {
 		t.Error("approved twice")
 	}
 }
+
+// Pinning prompts and resources added fields to Definition. A tool's hash
+// must not change with them, or every tool pinned before would be held.
+func TestToolHashUnchangedByNewFields(t *testing.T) {
+	d := FromTool(&mcp.Tool{
+		Name: "fs__read_file", Title: "Read", Description: "Reads a file.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	})
+	// The hash this definition had before prompts and resources were pinned.
+	const before = "sha256:e305846101d23c620684125143df59fecbdbf1204e65750ef6b425e5131701e2"
+	if got := d.Hash(); got != before {
+		t.Errorf("hash = %s, want %s", got, before)
+	}
+}
+
+func TestPromptAndResourceDefinitions(t *testing.T) {
+	p := FromPrompt(&mcp.Prompt{Name: "d__summarize", Description: "Summarizes.", Arguments: []*mcp.PromptArgument{{Name: "document", Required: true}}})
+	r := FromResource(&mcp.Resource{URI: "notes://meeting", Name: "meeting", Description: "Notes.", MIMEType: "text/plain", Size: 10})
+	if p.Key() != "prompt:d__summarize" || r.Key() != "resource:notes://meeting" || FromTool(&mcp.Tool{Name: "d__summarize"}).Key() != "d__summarize" {
+		t.Errorf("keys = %q, %q", p.Key(), r.Key())
+	}
+	for key, want := range map[string]string{"d__summarize": "tool", "prompt:d__summarize": KindPrompt, "resource:notes://meeting": KindResource} {
+		if got := KindOf(key); got != want {
+			t.Errorf("KindOf(%q) = %q, want %q", key, got, want)
+		}
+	}
+	// A prompt and a tool with the same name and description differ.
+	if p.Hash() == (Definition{Name: p.Name, Description: p.Description}).Hash() {
+		t.Error("a prompt hashes like a tool")
+	}
+	// A new argument changes a prompt; a resource's size doesn't change its pin.
+	p2 := FromPrompt(&mcp.Prompt{Name: "d__summarize", Description: "Summarizes.", Arguments: []*mcp.PromptArgument{{Name: "document", Required: true}, {Name: "github_token"}}})
+	if p.Hash() == p2.Hash() {
+		t.Error("a new argument didn't change the hash")
+	}
+	if r.Hash() != FromResource(&mcp.Resource{URI: "notes://meeting", Name: "meeting", Description: "Notes.", MIMEType: "text/plain", Size: 99}).Hash() {
+		t.Error("a resource's size changed its hash")
+	}
+
+	diff := strings.Join(Diff(p.Lines(), p2.Lines()), "\n")
+	for _, want := range []string{"  kind: prompt", "  name: d__summarize", `+       "name": "github_token"`} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("diff is missing %q:\n%s", want, diff)
+		}
+	}
+	lines := strings.Join(r.Lines(), "\n")
+	if lines != "kind: resource\nname: meeting\nuri: notes://meeting\ndescription:\n  Notes.\nmimeType: text/plain" {
+		t.Errorf("resource lines:\n%s", lines)
+	}
+
+	// They share the store with tools.
+	s := newStore(t, false)
+	st, err := s.Check(map[string]Definition{p.Key(): p, r.Key(): r, "d__summarize": def("x")})
+	if err != nil || st[p.Key()] != Pinned || st[r.Key()] != Pinned || st["d__summarize"] != Pinned {
+		t.Fatalf("Check = %v, %v", st, err)
+	}
+	st, err = s.Check(map[string]Definition{p.Key(): p2})
+	if err != nil || st[p.Key()] != Changed {
+		t.Fatalf("Check = %v, %v", st, err)
+	}
+	if got, err := s.Approve([]string{p.Key()}); err != nil || len(got) != 1 {
+		t.Errorf("Approve = %v, %v", got, err)
+	}
+}

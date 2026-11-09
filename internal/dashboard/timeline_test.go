@@ -188,6 +188,18 @@ func TestTell(t *testing.T) {
 			"server offered it:mute > portcullis held it back:bad > agent not offered:mute", "Tool held back", true,
 		},
 		{
+			"prompt rug pull",
+			audit.Event{Method: "tool/changed", Direction: audit.Internal, Tool: "prompt:evil__summarize", Reason: "its definition changed"},
+			gateway.Details{},
+			"server changed the prompt:warn > portcullis held it:bad > agent not offered:mute", "Rug pull held", true,
+		},
+		{
+			"poisoned resource",
+			audit.Event{Method: "tool/held", Direction: audit.Internal, Tool: "resource:notes://meeting", Reason: "its definition looks like tool poisoning"},
+			gateway.Details{},
+			"server offered it:mute > portcullis held it back:bad > agent not offered:mute", "Resource held back", true,
+		},
+		{
 			"disconnected",
 			audit.Event{Method: "upstream/disconnected", Direction: audit.Internal, Upstream: "git", Error: "EOF"},
 			gateway.Details{},
