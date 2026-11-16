@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 )
@@ -32,7 +33,7 @@ type Event struct {
 	Tool      string // the tool's name as the client sees it (fs__read_file)
 	Params    string // JSON, possibly truncated
 	Result    string // JSON, possibly truncated
-	Error     string // a protocol error; tool failures are in Result with IsError
+	Error     string // a protocol error, possibly truncated; tool failures are in Result with IsError
 	IsError   bool   // the call failed, as a protocol error or a tool error
 	Duration  time.Duration
 
@@ -208,7 +209,7 @@ func (s *Store) Record(ctx context.Context, e Event) error {
 		                     decision, rule, reason, would_decision, would_rule, findings)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, e.Time.UnixNano(), e.Direction, e.Upstream, e.Method, e.Tool,
-		s.truncate(e.Params), s.truncate(e.Result), e.Error, e.IsError, int64(e.Duration),
+		s.truncate(e.Params), s.truncate(e.Result), s.truncate(e.Error), e.IsError, int64(e.Duration),
 		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings)
 	return err
 }
@@ -216,11 +217,17 @@ func (s *Store) Record(ctx context.Context, e Event) error {
 // truncatedMarker ends a payload that was cut short.
 const truncatedMarker = "…[truncated]"
 
+// truncate cuts v to at most maxPayload bytes, at the start of a
+// character, so what's kept is still valid UTF-8 if v was.
 func (s *Store) truncate(v string) string {
 	if s.maxPayload <= 0 || len(v) <= s.maxPayload {
 		return v
 	}
-	return v[:s.maxPayload] + truncatedMarker
+	n := s.maxPayload
+	for n > 0 && !utf8.RuneStart(v[n]) {
+		n--
+	}
+	return v[:n] + truncatedMarker
 }
 
 // Filter selects events. Zero fields match everything.

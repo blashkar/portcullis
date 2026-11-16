@@ -201,6 +201,15 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 		}
 	}
 	if err := errors.Join(g.syncTools(first, u), g.syncPrompts(first, u), g.syncResources(first, u)); err != nil {
+		// Don't leave half an upstream behind: what was added would be
+		// offered with nothing to answer it, and the process would run on.
+		_ = session.Close()
+		g.removeFeatures(u)
+		g.mu.Lock()
+		if g.upstreams[name] == u {
+			delete(g.upstreams, name)
+		}
+		g.mu.Unlock()
 		return fmt.Errorf("listing %s's features: %w", name, err)
 	}
 	go func() {
@@ -699,8 +708,12 @@ func addResource(s *mcp.Server, r *mcp.Resource, h mcp.ResourceHandler) (err err
 	return nil
 }
 
-// upstreamExited removes an upstream's features once its session has ended.
-func (g *Gateway) upstreamExited(u *upstream, err error) {
+// removeFeatures withdraws an upstream's tools, prompts and resources
+// once its session has ended, and returns how many tools it withdrew. It
+// waits for a sync in progress, so the sync can't add them back after.
+func (g *Gateway) removeFeatures(u *upstream) int {
+	u.syncMu.Lock()
+	defer u.syncMu.Unlock()
 	g.mu.Lock()
 	u.session = nil
 	tools := slices.Collect(maps.Keys(u.tools))
@@ -712,18 +725,26 @@ func (g *Gateway) upstreamExited(u *upstream, err error) {
 	u.tools, u.prompts, u.resources = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	u.held, u.names = nil, nil
 
-	closing := g.closing
 	g.mu.Unlock()
 
 	g.server.RemoveTools(tools...)
 	g.server.RemovePrompts(prompts...)
 	g.server.RemoveResources(uris...)
+	return len(tools)
+}
+
+// upstreamExited removes an upstream's features once its session has ended.
+func (g *Gateway) upstreamExited(u *upstream, err error) {
+	removed := g.removeFeatures(u)
+	g.mu.Lock()
+	closing := g.closing
+	g.mu.Unlock()
 	if closing {
 		g.log.Info("upstream closed", "upstream", u.name)
 		g.record(context.Background(), audit.Event{Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/closed"}, Details{})
 		return
 	}
-	g.log.Warn("upstream disconnected", "upstream", u.name, "err", err, "tools_removed", len(tools))
+	g.log.Warn("upstream disconnected", "upstream", u.name, "err", err, "tools_removed", removed)
 	g.record(context.Background(), audit.Event{
 		Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: "upstream/disconnected",
 		Error: errString(err), IsError: true,

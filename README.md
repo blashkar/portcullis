@@ -440,7 +440,7 @@ I tried prompts that push `llama3.2:3b` harder: quote the suspicious sentence fi
 
 ## Audit log
 
-`serve` records every message in a SQLite database: the session, direction, server, method, tool, the params and the result (up to `audit.max_payload` bytes each, 64 KiB by default), any error, how long it took, and the policy's decision. The file is created with mode `0600`, since it holds tool arguments and results. `portcullis audit` searches it.
+`serve` records every message in a SQLite database: the session, direction, server, method, tool, the params, the result and any error (up to `audit.max_payload` bytes each, 64 KiB by default, cut between characters), how long it took, and the policy's decision. The file is created with mode `0600`, since it holds tool arguments and results. `portcullis audit` searches it.
 
 These are from a real run of the example config against the three sandboxed servers, with nine calls, some of them chosen to be blocked:
 

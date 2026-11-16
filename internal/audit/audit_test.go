@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func openTestStore(t *testing.T, maxPayload int) (*Store, string) {
@@ -141,6 +142,36 @@ func TestPayloadsAreTruncated(t *testing.T) {
 	got, _ := s.Events(ctx, Filter{})
 	if got[0].Params != "0123456789"+truncatedMarker || got[0].Result != "short" {
 		t.Errorf("params %q, result %q", got[0].Params, got[0].Result)
+	}
+}
+
+// A payload is cut at the start of a character, never inside one, and an
+// error is cut too: a server chooses what its errors say.
+func TestTruncationKeepsCharactersWhole(t *testing.T) {
+	s, _ := openTestStore(t, 10)
+	ctx := context.Background()
+	if err := s.StartSession(ctx, Session{ID: "s", Started: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// "é" is 2 bytes and "€" 3, so byte 10 falls inside a character.
+	e := Event{
+		SessionID: "s", Time: time.Now(), Direction: ClientToServer, Method: "m",
+		Params: "123456789é", Result: "12345678€€", Error: strings.Repeat("x", 100),
+	}
+	if err := s.Record(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Events(ctx, Filter{})
+	if got[0].Params != "123456789"+truncatedMarker || got[0].Result != "12345678"+truncatedMarker {
+		t.Errorf("params %q, result %q", got[0].Params, got[0].Result)
+	}
+	if got[0].Error != strings.Repeat("x", 10)+truncatedMarker {
+		t.Errorf("error %q", got[0].Error)
+	}
+	for _, v := range []string{got[0].Params, got[0].Result} {
+		if !utf8.ValidString(v) {
+			t.Errorf("%q isn't valid UTF-8", v)
+		}
 	}
 }
 
