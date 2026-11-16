@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blashkar/portcullis/internal/pin"
 	"github.com/blashkar/portcullis/internal/policy"
 )
 
@@ -150,14 +151,26 @@ policy:
 	}
 }
 
+func TestNewTools(t *testing.T) {
+	for v, want := range map[string]pin.NewMode{"": pin.HoldAfterFirst, "hold-after-first": pin.HoldAfterFirst, "pin": pin.TrustNew, "hold": pin.HoldNew} {
+		cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\npins: {new_tools: \""+v+"\"}"), "/cfg")
+		if err != nil || cfg.NewTools() != want {
+			t.Errorf("new_tools %q: %v, %v; want %v", v, cfg, err, want)
+		}
+	}
+	if _, err := Parse([]byte("servers: {fs: {command: [x]}}\npins: {new_tools: trust}"), "/cfg"); err == nil || !strings.Contains(err.Error(), "hold-after-first, pin or hold") {
+		t.Errorf("bad value: %v", err)
+	}
+}
+
 func TestGuardSettings(t *testing.T) {
 	cfg, err := Parse([]byte("servers: {fs: {command: [x]}}"), "/cfg")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Secure by default.
-	if cfg.PinsPath() != "/cfg/portcullis.pins.json" || cfg.HoldNewTools() || cfg.Scan.Tools != "" {
-		t.Errorf("defaults: pins %q, hold %v, scan %q", cfg.PinsPath(), cfg.HoldNewTools(), cfg.Scan.Tools)
+	if cfg.PinsPath() != "/cfg/portcullis.pins.json" || cfg.NewTools() != pin.HoldAfterFirst || cfg.Scan.Tools != "" {
+		t.Errorf("defaults: pins %q, mode %v, scan %q", cfg.PinsPath(), cfg.NewTools(), cfg.Scan.Tools)
 	}
 	if r, err := cfg.Redactor(); r == nil || err != nil {
 		t.Errorf("redactor = %v, %v", r, err)
@@ -174,7 +187,7 @@ redact:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.PinsPath() != "/var/lib/pins.json" || !cfg.HoldNewTools() || !cfg.ScanIgnore().Match("fs__read_file") {
+	if cfg.PinsPath() != "/var/lib/pins.json" || cfg.NewTools() != pin.HoldNew || !cfg.ScanIgnore().Match("fs__read_file") {
 		t.Errorf("settings: %+v", cfg)
 	}
 	r, _ := cfg.Redactor()

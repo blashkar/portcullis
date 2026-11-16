@@ -43,7 +43,7 @@ func startDashboardWith(t *testing.T, configure func(*Server)) *fixture {
 	f := &fixture{t: t, hub: NewHub(), heldM: map[string]string{}}
 	f.broker = approval.NewBroker(time.Minute, f.hub.Notify)
 	f.feed = NewFeed(100, redact.New(), f.hub.Notify)
-	f.pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), true)
+	f.pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), pin.HoldNew)
 	s := New(Options{
 		Hub: f.hub, Approvals: f.broker, Feed: f.feed, Pins: f.pins, Version: "test", SessionID: "SESSION1",
 		Held: func() map[string]string {
@@ -325,7 +325,7 @@ func TestVisible(t *testing.T) {
 func TestApproveHeldTool(t *testing.T) {
 	f := startDashboard(t)
 	tool := &mcp.Tool{Name: "add", Description: "Adds numbers", InputSchema: map[string]any{"type": "object"}}
-	if _, err := f.pins.Check(map[string]pin.Definition{"m__add": pin.FromTool(tool)}); err != nil {
+	if _, err := f.pins.Check("m", false, map[string]pin.Definition{"m__add": pin.FromTool(tool)}); err != nil {
 		t.Fatal(err)
 	}
 	f.heldMu.Lock()

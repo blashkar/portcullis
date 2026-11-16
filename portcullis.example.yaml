@@ -16,14 +16,15 @@ audit:
   path: portcullis.db       # relative to this file; created with mode 0600
   max_payload: 65536        # bytes of each message's params and result to keep
 
-# Pinning: each tool's, prompt's and resource's definition is recorded the
-# first time it's seen. If a server later changes one (a "rug pull"), it is
-# held back until you review and approve it with `portcullis pin diff` and
-# `portcullis pin approve`. Prompts and resources are pinned as
-# prompt:<name> and resource:<uri>.
+# Pinning: each tool's, prompt's and resource's definition is recorded on
+# its server's first run. If a server later changes one (a "rug pull"), or
+# adds a new one, it is held back until you review and approve it with
+# `portcullis pin diff` and `portcullis pin approve`. Prompts and resources
+# are pinned as prompt:<name> and resource:<uri>.
 pins:
   path: portcullis.pins.json   # relative to this file; worth committing
-  new_tools: pin               # pin: trust on first use; hold: approve each new tool, prompt and resource too
+  new_tools: hold-after-first  # hold-after-first: pin a server's first run, hold what it adds later;
+                               # hold: approve everything new, first run too; pin: trust each on first use
 
 # The tool-poisoning scanner reads every tool's description and schema
 # for text aimed at the model: hidden instructions, mentions of SSH keys

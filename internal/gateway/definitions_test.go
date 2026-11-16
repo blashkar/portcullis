@@ -71,7 +71,7 @@ func TestPromptRugPullIsHeldUntilApproved(t *testing.T) {
 		Arguments: []*mcp.PromptArgument{{Name: "document"}},
 	}, "Summarize it.")
 	h := startWith(t, map[string]*mcp.Server{"d": m}, func(o *Options) {
-		o.Pins = pin.Open(pins, false)
+		o.Pins = pin.Open(pins, pin.TrustNew)
 		o.PinPoll = 20 * time.Millisecond
 	})
 	if got := h.promptNames(); !slices.Equal(got, []string{"d__summarize|Summarizes a document."}) {
@@ -103,7 +103,7 @@ func TestPromptRugPullIsHeldUntilApproved(t *testing.T) {
 		t.Errorf("Held = %v", held)
 	}
 
-	if _, err := pin.Open(pins, false).Approve([]string{"prompt:d__summarize"}); err != nil {
+	if _, err := pin.Open(pins, pin.TrustNew).Approve([]string{"prompt:d__summarize"}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "the approved prompt to come back", func() bool {
@@ -123,7 +123,7 @@ func TestResourceRugPullIsHeldUntilApproved(t *testing.T) {
 	addTextResource(m, &mcp.Resource{URI: "notes://meeting", Name: "meeting", Description: "Today's meeting notes."}, "10am")
 	addTextResource(m, &mcp.Resource{URI: "notes://todo", Name: "todo"}, "milk")
 	h := startWith(t, map[string]*mcp.Server{"n": m}, func(o *Options) {
-		o.Pins = pin.Open(pins, false)
+		o.Pins = pin.Open(pins, pin.TrustNew)
 		o.PinPoll = 20 * time.Millisecond
 	})
 	if got := h.resourceURIs(); len(got) != 2 {
@@ -146,7 +146,7 @@ func TestResourceRugPullIsHeldUntilApproved(t *testing.T) {
 		t.Errorf("the held read's event = %+v", e)
 	}
 
-	if _, err := pin.Open(pins, false).Approve(nil); err != nil {
+	if _, err := pin.Open(pins, pin.TrustNew).Approve(nil); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "the approved resource to come back", func() bool {
@@ -162,7 +162,7 @@ func TestHoldNewPromptsAndResources(t *testing.T) {
 	addTextPrompt(m, &mcp.Prompt{Name: "summarize"}, "Summarize it.")
 	addTextResource(m, &mcp.Resource{URI: "notes://meeting", Name: "meeting"}, "10am")
 	h := startWith(t, map[string]*mcp.Server{"d": m}, func(o *Options) {
-		o.Pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), true)
+		o.Pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), pin.HoldNew)
 	})
 	if p, r := h.promptNames(), h.resourceURIs(); len(p)+len(r) != 0 {
 		t.Fatalf("prompts = %v, resources = %v; want none until approved", p, r)

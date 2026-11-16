@@ -28,10 +28,10 @@ func newPinCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pin",
 		Short: "Review and approve tool, prompt and resource definitions",
-		Long: `portcullis serve pins each tool's, prompt's and resource's definition the
-first time it sees it. If a server later changes one, such as a tool's
-description or schema, it is held back until you review the change and
-approve it. These commands do that; a running serve picks up approvals
+		Long: `portcullis serve pins each tool's, prompt's and resource's definition on
+its server's first run. If a server later changes one, such as a tool's
+description or schema, or adds a new one, it is held back until you review
+it and approve it. These commands do that; a running serve picks up approvals
 within a few seconds.
 
 Tools go by their names. Prompts go by prompt:<name> and resources by
@@ -89,7 +89,7 @@ func openPins(opts pinOptions) (*pin.Store, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("no pin file at %s: %w", path, err)
 	}
-	return pin.Open(path, false), nil
+	return pin.Open(path, pin.TrustNew), nil
 }
 
 func runPinList(out io.Writer, opts pinOptions) error {

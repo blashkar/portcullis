@@ -118,6 +118,9 @@ func (d Definition) Hash() string {
 
 // Entry is one tool's, prompt's or resource's record in the pin file.
 type Entry struct {
+	// Server is the server that offered it. Entries written before servers
+	// were recorded don't have one until that server offers them again.
+	Server string `json:"server,omitempty"`
 	// Hash and Definition are the approved definition; both are empty if
 	// it has never been approved.
 	Hash       string      `json:"hash,omitempty"`
@@ -167,20 +170,55 @@ const fileVersion = 1
 // several processes at once: changes are made under a lock on the file and
 // written atomically.
 type Store struct {
-	path    string
-	holdNew bool
-	now     func() time.Time
+	path string
+	mode NewMode
+	now  func() time.Time
 
 	mu  sync.Mutex
 	sum [32]byte // the file's content when this Store last read or wrote it
 }
 
+// NewMode is what happens to a definition the pin file has never seen.
+type NewMode int
+
+// New modes.
+const (
+	// HoldAfterFirst pins everything a server offers on its first run,
+	// and holds what it adds after that for approval.
+	HoldAfterFirst NewMode = iota
+	// TrustNew pins every new definition on first sight.
+	TrustNew
+	// HoldNew holds every new definition for approval.
+	HoldNew
+)
+
 // Open returns the Store for the pin file at path, which needn't exist
-// yet. If holdNew is set, definitions never seen before are held for
-// approval instead of being pinned on first sight.
-func Open(path string, holdNew bool) *Store {
+// yet. mode says what happens to definitions never seen before.
+func Open(path string, mode NewMode) *Store {
 	// Until the Store reads the file, compare with a missing one.
-	return &Store{path: path, holdNew: holdNew, now: time.Now, sum: sha256.Sum256(nil)}
+	return &Store{path: path, mode: mode, now: time.Now, sum: sha256.Sum256(nil)}
+}
+
+// Mode returns what the Store does with new definitions.
+func (s *Store) Mode() NewMode {
+	return s.mode
+}
+
+// Seen reports whether the pin file has anything from server: an entry
+// recorded as the server's, or one with no server that legacy says is its,
+// such as by its name.
+func (s *Store) Seen(server string, legacy func(key string) bool) (bool, error) {
+	var seen bool
+	err := s.update(func(f *file) bool {
+		for key, e := range f.Tools {
+			if e.Server == server || e.Server == "" && legacy != nil && legacy(key) {
+				seen = true
+				return false
+			}
+		}
+		return false
+	})
+	return seen, err
 }
 
 // Path returns the pin file's path.
@@ -188,10 +226,12 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// Check compares the definitions a server offers, keyed by Key, with the
-// pinned ones. New definitions are pinned (or held), and a changed one is
-// recorded as pending so it can be reviewed.
-func (s *Store) Check(defs map[string]Definition) (map[string]Status, error) {
+// Check compares the definitions server offers, keyed by Key, with the
+// pinned ones. New definitions are pinned or held, as the Store's mode
+// says; firstRun tells HoldAfterFirst that this is the server's first run.
+// A changed definition is recorded as pending so it can be reviewed.
+func (s *Store) Check(server string, firstRun bool, defs map[string]Definition) (map[string]Status, error) {
+	trust := s.mode == TrustNew || s.mode == HoldAfterFirst && firstRun
 	out := make(map[string]Status, len(defs))
 	err := s.update(func(f *file) bool {
 		dirty := false
@@ -199,9 +239,13 @@ func (s *Store) Check(defs map[string]Definition) (map[string]Status, error) {
 		for name, def := range defs {
 			h := def.Hash()
 			e := f.Tools[name]
+			if e != nil && e.Server == "" && server != "" {
+				e.Server = server
+				dirty = true
+			}
 			switch {
-			case e == nil && !s.holdNew:
-				f.Tools[name] = &Entry{Hash: h, Definition: &def, Approved: now}
+			case e == nil && trust:
+				f.Tools[name] = &Entry{Server: server, Hash: h, Definition: &def, Approved: now}
 				out[name] = Pinned
 				dirty = true
 			case e != nil && e.Hash == h:
@@ -213,7 +257,7 @@ func (s *Store) Check(defs map[string]Definition) (map[string]Status, error) {
 				}
 			default:
 				if e == nil {
-					e = &Entry{}
+					e = &Entry{Server: server}
 					f.Tools[name] = e
 				}
 				out[name] = Changed

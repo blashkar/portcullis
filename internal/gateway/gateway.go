@@ -187,7 +187,20 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 	g.upstreams[name] = u
 	g.mu.Unlock()
 
-	if err := errors.Join(g.syncTools(ctx, u), g.syncPrompts(ctx, u), g.syncResources(ctx, u)); err != nil {
+	// Only this first listing may pin what a new server offers; anything
+	// it adds later, in a refresh, is held.
+	first := ctx
+	if g.opts.Pins != nil && g.opts.Pins.Mode() == pin.HoldAfterFirst {
+		seen, err := g.opts.Pins.Seen(name, ownedBy(name))
+		if err != nil {
+			return fmt.Errorf("listing %s's features: %w", name, err)
+		}
+		if !seen {
+			first = context.WithValue(ctx, firstRunKey{}, true)
+			g.log.Info("first run of upstream: pinning what it offers", "upstream", name)
+		}
+	}
+	if err := errors.Join(g.syncTools(first, u), g.syncPrompts(first, u), g.syncResources(first, u)); err != nil {
 		return fmt.Errorf("listing %s's features: %w", name, err)
 	}
 	go func() {
@@ -284,6 +297,20 @@ func prefixed(upstream, name string) string {
 	return upstream + config.Separator + name
 }
 
+// ownedBy returns whether a pin key with no server recorded is upstream's
+// by its name: tools and prompts are named after their server. Resources
+// are keyed by URI, so an old resource entry counts for no server.
+func ownedBy(upstream string) func(key string) bool {
+	return func(key string) bool {
+		name := strings.TrimPrefix(key, pin.KindPrompt+":")
+		if pin.KindOf(key) == pin.KindResource {
+			return false
+		}
+		u, _, ok := splitName(name)
+		return ok && u == upstream
+	}
+}
+
 // splitName splits a client-facing name into upstream and original name.
 // ok is false, and upstream "", if the name has no prefix.
 func splitName(name string) (upstream, original string, ok bool) {
@@ -329,7 +356,7 @@ func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
 	u.names = names
 	g.mu.Unlock()
 
-	checks, err := g.checkTools(u.name, offered, g.otherToolNames(u.name))
+	checks, err := g.checkTools(ctx, u.name, offered, g.otherToolNames(u.name))
 	if err != nil {
 		return err
 	}
@@ -527,7 +554,7 @@ func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
 		offered[fp.Name] = &fp
 		originals[fp.Name] = p.Name
 	}
-	checks, err := g.checkPrompts(u.name, offered, g.otherToolNames(u.name))
+	checks, err := g.checkPrompts(ctx, u.name, offered, g.otherToolNames(u.name))
 	if err != nil {
 		return err
 	}
@@ -596,7 +623,7 @@ func (g *Gateway) syncResources(ctx context.Context, u *upstream) error {
 		}
 		offered[r.URI] = r
 	}
-	checks, err := g.checkResources(u.name, offered, g.otherToolNames(u.name))
+	checks, err := g.checkResources(ctx, u.name, offered, g.otherToolNames(u.name))
 	if err != nil {
 		return err
 	}

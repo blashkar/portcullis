@@ -107,7 +107,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 	}
 	gwOpts := gateway.Options{Version: version, SessionID: sessionID, Logger: log, Policy: pol, Redactor: redactor}
 	if path := cfg.PinsPath(); path != "" {
-		gwOpts.Pins = pin.Open(path, cfg.HoldNewTools())
+		gwOpts.Pins = pin.Open(path, cfg.NewTools())
 		log.Info("pinning tool definitions", "path", path)
 	} else {
 		log.Warn("tool pinning is off: changed tool definitions won't be caught")

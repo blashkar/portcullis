@@ -77,39 +77,43 @@ type offering struct {
 
 // checkTools pins and scans the tools an upstream offers, keyed by their
 // client-facing names. others are the other upstreams' tool names.
-func (g *Gateway) checkTools(upstream string, tools map[string]*mcp.Tool, others []string) (map[string]toolCheck, error) {
+func (g *Gateway) checkTools(ctx context.Context, upstream string, tools map[string]*mcp.Tool, others []string) (map[string]toolCheck, error) {
 	offered := make(map[string]offering, len(tools))
 	for name, t := range tools {
 		offered[name] = offering{def: pin.FromTool(t), scan: func() []scan.Finding { return scan.Tool(t, others) }}
 	}
-	return g.check(upstream, offered)
+	return g.check(ctx, upstream, offered)
 }
 
 // checkPrompts pins and scans the prompts an upstream offers, keyed by
 // their client-facing names. The result is keyed by pin key.
-func (g *Gateway) checkPrompts(upstream string, prompts map[string]*mcp.Prompt, others []string) (map[string]toolCheck, error) {
+func (g *Gateway) checkPrompts(ctx context.Context, upstream string, prompts map[string]*mcp.Prompt, others []string) (map[string]toolCheck, error) {
 	offered := make(map[string]offering, len(prompts))
 	for _, p := range prompts {
 		def := pin.FromPrompt(p)
 		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Prompt(p, others) }}
 	}
-	return g.check(upstream, offered)
+	return g.check(ctx, upstream, offered)
 }
 
 // checkResources pins and scans the resources an upstream offers, keyed by
 // URI. The result is keyed by pin key.
-func (g *Gateway) checkResources(upstream string, resources map[string]*mcp.Resource, others []string) (map[string]toolCheck, error) {
+func (g *Gateway) checkResources(ctx context.Context, upstream string, resources map[string]*mcp.Resource, others []string) (map[string]toolCheck, error) {
 	offered := make(map[string]offering, len(resources))
 	for _, r := range resources {
 		def := pin.FromResource(r)
 		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Resource(r, others) }}
 	}
-	return g.check(upstream, offered)
+	return g.check(ctx, upstream, offered)
 }
+
+// firstRunKey marks the context of the first listing of a server the pin
+// file has nothing from, whose definitions HoldAfterFirst pins.
+type firstRunKey struct{}
 
 // check pins and scans what an upstream offers, keyed by pin key, and says
 // which of it to hold back.
-func (g *Gateway) check(upstream string, offered map[string]offering) (map[string]toolCheck, error) {
+func (g *Gateway) check(ctx context.Context, upstream string, offered map[string]offering) (map[string]toolCheck, error) {
 	out := make(map[string]toolCheck, len(offered))
 	var statuses map[string]pin.Status
 	if g.opts.Pins != nil {
@@ -118,7 +122,7 @@ func (g *Gateway) check(upstream string, offered map[string]offering) (map[strin
 			defs[key] = o.def
 		}
 		var err error
-		if statuses, err = g.opts.Pins.Check(defs); err != nil {
+		if statuses, err = g.opts.Pins.Check(upstream, ctx.Value(firstRunKey{}) == true, defs); err != nil {
 			return nil, err
 		}
 	}

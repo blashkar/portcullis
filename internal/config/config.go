@@ -32,6 +32,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/blashkar/portcullis/internal/glob"
+	"github.com/blashkar/portcullis/internal/pin"
 	"github.com/blashkar/portcullis/internal/policy"
 	"github.com/blashkar/portcullis/internal/redact"
 )
@@ -127,8 +128,9 @@ type Pins struct {
 	Path     string `yaml:"path"`
 	Disabled bool   `yaml:"disabled"`
 	// NewTools is what happens to a tool, prompt or resource seen for the
-	// first time: "pin" (the default) trusts it and pins it; "hold" holds
-	// it until approved.
+	// first time: "hold-after-first" (the default) pins what a server offers
+	// on its first run and holds what it adds later until approved; "pin"
+	// trusts and pins each one; "hold" holds each one until approved.
 	NewTools string `yaml:"new_tools"`
 }
 
@@ -293,9 +295,9 @@ func (c *Config) validate() error {
 		errs = append(errs, err)
 	}
 	switch c.Pins.NewTools {
-	case "", "pin", "hold":
+	case "", "hold-after-first", "pin", "hold":
 	default:
-		errs = append(errs, fmt.Errorf("pins.new_tools must be pin or hold, not %q", c.Pins.NewTools))
+		errs = append(errs, fmt.Errorf("pins.new_tools must be hold-after-first, pin or hold, not %q", c.Pins.NewTools))
 	}
 	switch c.Scan.Tools {
 	case "", "hide", "log", "off":
@@ -381,10 +383,15 @@ func (c *Config) PinsPath() string {
 	return c.resolve(c.Pins.Path, DefaultPinsPath)
 }
 
-// HoldNewTools reports whether tools seen for the first time wait for
-// approval.
-func (c *Config) HoldNewTools() bool {
-	return c.Pins.NewTools == "hold"
+// NewTools returns what happens to definitions seen for the first time.
+func (c *Config) NewTools() pin.NewMode {
+	switch c.Pins.NewTools {
+	case "pin":
+		return pin.TrustNew
+	case "hold":
+		return pin.HoldNew
+	}
+	return pin.HoldAfterFirst
 }
 
 // ScanIgnore returns the compiled scan.ignore patterns.

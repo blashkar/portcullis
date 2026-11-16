@@ -34,7 +34,7 @@ func TestDemoScenario(t *testing.T) {
 	ctx := t.Context()
 	gw := gateway.New(gateway.Options{
 		Policy: pol, Redactor: redactor,
-		Pins:    pin.Open(filepath.Join(t.TempDir(), "pins.json"), false),
+		Pins:    pin.Open(filepath.Join(t.TempDir(), "pins.json"), pin.TrustNew),
 		PinPoll: 50 * time.Millisecond,
 		Scan:    gateway.ScanOptions{Enabled: true, Hide: true},
 		Inject:  gateway.InjectOptions{Detector: &inject.Detector{}, Action: gateway.InjectWarn},
