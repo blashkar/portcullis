@@ -48,6 +48,13 @@ type Event struct {
 	// Findings is what portcullis noticed in the message, such as
 	// "redacted: github_token" or a tool definition's scan findings.
 	Findings string
+
+	// Withheld is the result, prompt or error text portcullis withheld
+	// from the client as a prompt injection, redacted and possibly
+	// truncated. It may hold instructions aimed at a model, so only Event
+	// returns it; Events reports just whether there is one, in HasWithheld.
+	Withheld    string
+	HasWithheld bool
 }
 
 // DecisionHeld is the decision recorded for a call to a tool that is held
@@ -111,6 +118,8 @@ var migrations = []string{
 	 ALTER TABLE events ADD COLUMN would_decision TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE events ADD COLUMN would_rule TEXT NOT NULL DEFAULT '';`,
 	`ALTER TABLE events ADD COLUMN findings TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE events ADD COLUMN withheld TEXT NOT NULL DEFAULT '';
+	 CREATE INDEX IF NOT EXISTS events_time ON events(time_ns);`,
 }
 
 // Store is an open audit database. It is safe for concurrent use.
@@ -204,14 +213,63 @@ func (s *Store) EndSession(ctx context.Context, sessionID string, ended time.Tim
 
 // Record stores an event.
 func (s *Store) Record(ctx context.Context, e Event) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events (session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
-		                     decision, rule, reason, would_decision, would_rule, findings)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.SessionID, e.Time.UnixNano(), e.Direction, e.Upstream, e.Method, e.Tool,
-		s.truncate(e.Params), s.truncate(e.Result), s.truncate(e.Error), e.IsError, int64(e.Duration),
-		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings)
-	return err
+	return s.RecordBatch(ctx, []Event{e})
+}
+
+const insertEvent = `INSERT INTO events (session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
+                    decision, rule, reason, would_decision, would_rule, findings, withheld)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+// RecordBatch stores events in one transaction: all of them or none.
+func (s *Store) RecordBatch(ctx context.Context, events []Event) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, insertEvent)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, e := range events {
+		if _, err := stmt.ExecContext(ctx,
+			e.SessionID, e.Time.UnixNano(), e.Direction, e.Upstream, e.Method, e.Tool,
+			s.truncate(e.Params), s.truncate(e.Result), s.truncate(e.Error), e.IsError, int64(e.Duration),
+			e.Decision, e.Rule, s.truncate(e.Reason), e.WouldDecision, e.WouldRule, s.truncate(e.Findings), s.truncate(e.Withheld)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// pruneChunk is how many events Prune deletes at a time. Each chunk is
+// its own statement, so writes waiting for the one connection get a turn
+// between them, even when a large old log is pruned for the first time.
+const pruneChunk = 2000
+
+// Prune deletes the events from before t, and the sessions that started
+// before t and have no events left. It returns how many of each it deleted.
+func (s *Store) Prune(ctx context.Context, t time.Time) (events, sessions int64, err error) {
+	for {
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM events WHERE id IN (SELECT id FROM events WHERE time_ns < ? LIMIT ?)`, t.UnixNano(), pruneChunk)
+		if err != nil {
+			return events, 0, err
+		}
+		n, _ := res.RowsAffected()
+		events += n
+		if n < pruneChunk {
+			break
+		}
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE started_ns < ? AND NOT EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.id)`, t.UnixNano())
+	if err != nil {
+		return events, 0, err
+	}
+	sessions, _ = res.RowsAffected()
+	return events, sessions, nil
 }
 
 // truncatedMarker ends a payload that was cut short.
@@ -232,6 +290,7 @@ func (s *Store) truncate(v string) string {
 
 // Filter selects events. Zero fields match everything.
 type Filter struct {
+	ID        int64
 	SessionID string
 	Tool      string // exact name, or a prefix ending in "*" such as "fs__*"
 	Method    string
@@ -248,13 +307,37 @@ type Filter struct {
 	Limit   int // 0 means no limit
 }
 
-// Events returns the matching events, oldest first.
+// ErrNoEvent is returned by Event for an ID that isn't in the log.
+var ErrNoEvent = errors.New("no event with that ID")
+
+// Event returns one event, with what was withheld from the client, if
+// anything.
+func (s *Store) Event(ctx context.Context, id int64) (Event, error) {
+	events, err := s.events(ctx, Filter{ID: id}, true)
+	if err != nil {
+		return Event{}, err
+	}
+	if len(events) == 0 {
+		return Event{}, ErrNoEvent
+	}
+	return events[0], nil
+}
+
+// Events returns the matching events, oldest first. They don't include
+// what was withheld from the client; Event does.
 func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
+	return s.events(ctx, f, false)
+}
+
+func (s *Store) events(ctx context.Context, f Filter, withheld bool) ([]Event, error) {
 	var where []string
 	var args []any
 	add := func(cond string, arg any) {
 		where = append(where, cond)
 		args = append(args, arg)
+	}
+	if f.ID != 0 {
+		add("id = ?", f.ID)
 	}
 	if f.SessionID != "" {
 		add("session_id = ?", f.SessionID)
@@ -295,7 +378,7 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 	}
 
 	q := `SELECT id, session_id, time_ns, direction, upstream, method, tool, params, result, error, is_error, duration_ns,
-	             decision, rule, reason, would_decision, would_rule, findings FROM events`
+	             decision, rule, reason, would_decision, would_rule, findings, withheld != '', ` + withheldCol(withheld) + ` FROM events`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -318,13 +401,21 @@ func (s *Store) Events(ctx context.Context, f Filter) ([]Event, error) {
 		var t, d int64
 		if err := rows.Scan(&e.ID, &e.SessionID, &t, &e.Direction, &e.Upstream, &e.Method, &e.Tool,
 			&e.Params, &e.Result, &e.Error, &e.IsError, &d,
-			&e.Decision, &e.Rule, &e.Reason, &e.WouldDecision, &e.WouldRule, &e.Findings); err != nil {
+			&e.Decision, &e.Rule, &e.Reason, &e.WouldDecision, &e.WouldRule, &e.Findings, &e.HasWithheld, &e.Withheld); err != nil {
 			return nil, err
 		}
 		e.Time, e.Duration = time.Unix(0, t), time.Duration(d)
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// withheldCol selects the withheld text, or nothing in its place.
+func withheldCol(withheld bool) string {
+	if withheld {
+		return "withheld"
+	}
+	return "''"
 }
 
 // Sessions returns the most recent sessions, newest first, with event counts.

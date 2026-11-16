@@ -119,7 +119,14 @@ type Audit struct {
 	// MaxPayload caps the stored params and result of each message, in
 	// bytes; 0 means DefaultMaxPayload.
 	MaxPayload int `yaml:"max_payload"`
+	// Retention is how long events are kept, as a number of days ("90d")
+	// or a Go duration ("720h"); "" means DefaultRetention, and "0" keeps
+	// them forever.
+	Retention string `yaml:"retention"`
 }
+
+// DefaultRetention is how long the audit log keeps events by default.
+const DefaultRetention = 90 * 24 * time.Hour
 
 // Pins configures pinning: holding back a tool, prompt or resource whose
 // definition changed since it was approved.
@@ -290,6 +297,9 @@ func (c *Config) validate() error {
 	}
 	if c.Audit.MaxPayload < 0 {
 		errs = append(errs, errors.New("audit.max_payload can't be negative"))
+	}
+	if _, err := parseRetention(c.Audit.Retention); err != nil {
+		errs = append(errs, err)
 	}
 	if _, err := c.CompilePolicy(); err != nil {
 		errs = append(errs, err)
@@ -467,6 +477,38 @@ func (c *Config) resolve(p, def string) string {
 		p = filepath.Join(c.Dir, p)
 	}
 	return p
+}
+
+// Retention returns how long the audit log keeps events; 0 means forever.
+func (c *Config) Retention() time.Duration {
+	d, _ := parseRetention(c.Audit.Retention)
+	return d
+}
+
+func parseRetention(s string) (time.Duration, error) {
+	switch s {
+	case "":
+		return DefaultRetention, nil
+	case "0":
+		return 0, nil
+	}
+	var d time.Duration
+	var err error
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		var n int
+		if n, err = strconv.Atoi(days); err == nil {
+			if n > 100*365 {
+				return 0, fmt.Errorf("audit.retention %q is too long; use 0 to keep events forever", s)
+			}
+			d = time.Duration(n) * 24 * time.Hour
+		}
+	} else {
+		d, err = time.ParseDuration(s)
+	}
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("audit.retention must be a number of days such as 90d, a duration such as 720h, or 0 to keep events forever, not %q", s)
+	}
+	return d, nil
 }
 
 // MaxPayload returns the audit payload cap in bytes.

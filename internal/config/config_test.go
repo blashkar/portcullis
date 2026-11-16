@@ -151,6 +151,20 @@ policy:
 	}
 }
 
+func TestRetention(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": DefaultRetention, "0": 0, "30d": 30 * 24 * time.Hour, "36h": 36 * time.Hour} {
+		cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\naudit: {retention: \""+v+"\"}"), "/cfg")
+		if err != nil || cfg.Retention() != want {
+			t.Errorf("retention %q: %v, %v; want %v", v, cfg.Retention(), err, want)
+		}
+	}
+	for _, v := range []string{"-1d", "ninety", "-5h", "0d", "999999d", "1y"} {
+		if _, err := Parse([]byte("servers: {fs: {command: [x]}}\naudit: {retention: \""+v+"\"}"), "/cfg"); err == nil || !strings.Contains(err.Error(), "audit.retention") {
+			t.Errorf("retention %q: %v", v, err)
+		}
+	}
+}
+
 func TestNewTools(t *testing.T) {
 	for v, want := range map[string]pin.NewMode{"": pin.HoldAfterFirst, "hold-after-first": pin.HoldAfterFirst, "pin": pin.TrustNew, "hold": pin.HoldNew} {
 		cfg, err := Parse([]byte("servers: {fs: {command: [x]}}\npins: {new_tools: \""+v+"\"}"), "/cfg")

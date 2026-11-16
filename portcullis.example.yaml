@@ -14,7 +14,8 @@ servers:
 
 audit:
   path: portcullis.db       # relative to this file; created with mode 0600
-  max_payload: 65536        # bytes of each message's params and result to keep
+  max_payload: 65536        # bytes of each message's params, result and error to keep
+  retention: 90d            # delete events older than this; 0 keeps everything
 
 # Pinning: each tool's, prompt's and resource's definition is recorded on
 # its server's first run. If a server later changes one (a "rug pull"), or

@@ -150,7 +150,15 @@ func runServe(ctx context.Context, opts serveOptions) error {
 				log.Error("audit: ending the session", "err", err)
 			}
 		}()
-		gwOpts.Recorder = store
+		// Events are written in the background, off the calls' path. The
+		// queue is closed, writing what's left, before the session ends.
+		queue := audit.NewQueue(store, auditQueueSize, func(err error) { log.Error("writing the audit log", "err", err) })
+		defer queue.Close()
+		if keep := cfg.Retention(); keep > 0 {
+			stop := pruneAudit(ctx, store, keep, log)
+			defer stop()
+		}
+		gwOpts.Recorder = queue
 		auditLog = store
 		gwOpts.OnClientInfo = func(name, ver string) {
 			log.Info("client identified", "client", name, "client_version", ver)
@@ -413,4 +421,42 @@ func (p *prefixWriter) writeLine(line []byte) error {
 	}
 	_, err := fmt.Fprintf(p.w, "%s%s\n", p.prefix, strings.Join(parts, "\t"))
 	return err
+}
+
+// auditQueueSize is how many audit events can wait to be written before
+// recording one waits for the disk.
+const auditQueueSize = 1024
+
+// auditPruneEvery is how often serve deletes audit events older than
+// audit.retention, after doing so once at start.
+const auditPruneEvery = time.Hour
+
+// pruneAudit deletes events older than keep now and every auditPruneEvery,
+// until the returned function is called; it waits for a prune in progress.
+func pruneAudit(ctx context.Context, store *audit.Store, keep time.Duration, log *slog.Logger) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(auditPruneEvery)
+		defer t.Stop()
+		for {
+			events, sessions, err := store.Prune(ctx, time.Now().Add(-keep))
+			switch {
+			case err != nil && ctx.Err() == nil:
+				log.Error("audit: deleting old events", "err", err)
+			case events+sessions > 0:
+				log.Info("audit: deleted old events", "events", events, "sessions", sessions, "retention", keep)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }

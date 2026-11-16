@@ -815,6 +815,7 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 				findings = append(findings, note.injection)
 			}
 			e.Findings = strings.Join(findings, "; ")
+			e.Withheld = note.withheldText
 			g.logEvent(e)
 			g.record(context.WithoutCancel(ctx), e, note.details())
 			return res, err
@@ -878,12 +879,21 @@ func (g *Gateway) logEvent(e audit.Event) {
 func (g *Gateway) record(ctx context.Context, e audit.Event, d Details) {
 	e.SessionID = g.opts.SessionID
 	if g.opts.Observer != nil {
-		g.opts.Observer.Observe(e, d)
+		// What was withheld stays in the audit log: the dashboard and
+		// metrics don't need it, and it may be aimed at a model.
+		o := e
+		o.Withheld = ""
+		g.opts.Observer.Observe(o, d)
 	}
 	if g.opts.Recorder == nil {
 		return
 	}
 	if err := g.opts.Recorder.Record(ctx, e); err != nil {
+		if errors.Is(err, audit.ErrClosed) {
+			// Shutting down: an upstream exiting after the log closed.
+			g.log.Debug("audit log closed", "method", e.Method, "upstream", e.Upstream)
+			return
+		}
 		g.log.Error("writing the audit log", "err", err)
 	}
 }
