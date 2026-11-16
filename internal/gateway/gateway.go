@@ -302,11 +302,10 @@ func prefixed(upstream, name string) string {
 // are keyed by URI, so an old resource entry counts for no server.
 func ownedBy(upstream string) func(key string) bool {
 	return func(key string) bool {
-		name := strings.TrimPrefix(key, pin.KindPrompt+":")
 		if pin.KindOf(key) == pin.KindResource {
 			return false
 		}
-		u, _, ok := splitName(name)
+		u, _, ok := splitName(strings.TrimPrefix(key, pin.KindPrompt+":"))
 		return ok && u == upstream
 	}
 }

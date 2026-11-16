@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,5 +129,38 @@ func TestHoldAfterFirstWithAnOldPinFile(t *testing.T) {
 	entries, err := pin.Open(pins, pin.HoldAfterFirst).Entries()
 	if err != nil || entries["m__add"].Server != "m" {
 		t.Errorf("the old entry wasn't given its server: %+v, %v", entries["m__add"], err)
+	}
+}
+
+// A server that adds to its lists while the first run is being listed:
+// the refresh this sets off can list it before the first run's own
+// listing does, and must not leave the first run's definitions held.
+func TestFirstRunWithAListChangeDuringIt(t *testing.T) {
+	m := newUpstream("docs")
+	addTextTool(m, "search", "Searches the docs.", "ok")
+	addTextPrompt(m, &mcp.Prompt{Name: "summarize"}, "Summarize it.")
+	addTextResource(m, &mcp.Resource{URI: "notes://meeting", Name: "meeting"}, "10am")
+	var once sync.Once
+	m.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				once.Do(func() {
+					addTextPrompt(m, &mcp.Prompt{Name: "translate"}, "Translate it.")
+					addTextResource(m, &mcp.Resource{URI: "notes://todo", Name: "todo"}, "milk")
+					// A real server's listing is slower than the SDK's
+					// delay before it sends list_changed.
+					time.Sleep(30 * time.Millisecond)
+				})
+			}
+			return next(ctx, method, req)
+		}
+	})
+	h := startWith(t, map[string]*mcp.Server{"d": m}, holdAfterFirst(filepath.Join(t.TempDir(), "pins.json")))
+	time.Sleep(50 * time.Millisecond) // let the refreshes finish
+	if held := h.gw.Held(); len(held) != 0 {
+		t.Errorf("Held = %v; want the first run pinned", held)
+	}
+	if p, r := h.promptNames(), h.resourceURIs(); len(p) != 2 || len(r) != 2 {
+		t.Errorf("prompts = %v, resources = %v", p, r)
 	}
 }

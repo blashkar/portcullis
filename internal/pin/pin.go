@@ -232,6 +232,11 @@ func (s *Store) Path() string {
 // A changed definition is recorded as pending so it can be reviewed.
 func (s *Store) Check(server string, firstRun bool, defs map[string]Definition) (map[string]Status, error) {
 	trust := s.mode == TrustNew || s.mode == HoldAfterFirst && firstRun
+	// On a first run, an entry this server got since the run began, such
+	// as from a refresh listing it first, or from another portcullis
+	// starting it at the same time, is part of that run. One without a
+	// server is older, and stays as it is.
+	trustUnapproved := s.mode == HoldAfterFirst && firstRun
 	out := make(map[string]Status, len(defs))
 	err := s.update(func(f *file) bool {
 		dirty := false
@@ -239,12 +244,13 @@ func (s *Store) Check(server string, firstRun bool, defs map[string]Definition) 
 		for name, def := range defs {
 			h := def.Hash()
 			e := f.Tools[name]
+			ours := e != nil && e.Server == server && server != ""
 			if e != nil && e.Server == "" && server != "" {
 				e.Server = server
 				dirty = true
 			}
 			switch {
-			case e == nil && trust:
+			case e == nil && trust, ours && e.Hash == "" && trustUnapproved:
 				f.Tools[name] = &Entry{Server: server, Hash: h, Definition: &def, Approved: now}
 				out[name] = Pinned
 				dirty = true

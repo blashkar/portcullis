@@ -405,3 +405,25 @@ func TestSeen(t *testing.T) {
 		t.Error("Seen(n) after its first run = false")
 	}
 }
+
+// On a first run, an entry the same server got since the run began is
+// pinned; one with no server, from an older file, stays held.
+func TestFirstRunPinsItsOwnUnapprovedEntries(t *testing.T) {
+	s := newStore(t, HoldAfterFirst)
+	// A refresh got there first, outside the first run.
+	if st, _ := s.Check("m", false, map[string]Definition{"m__add": def("Adds")}); st["m__add"] != New {
+		t.Fatalf("refresh: %v", st)
+	}
+	if st, _ := s.Check("m", true, map[string]Definition{"m__add": def("Adds")}); st["m__add"] != Pinned {
+		t.Errorf("first run: %v", st)
+	}
+
+	path := filepath.Join(t.TempDir(), "pins.json")
+	old := `{"version": 1, "tools": {"m__sub": {"pending": {"hash": "sha256:x", "definition": {"name": "sub"}, "seen": "2026-01-01T00:00:00Z"}}}}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := Open(path, HoldAfterFirst).Check("m", true, map[string]Definition{"m__sub": def("Subtracts")}); st["m__sub"] != New {
+		t.Errorf("an older never-approved entry: %v", st)
+	}
+}

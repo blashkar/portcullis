@@ -318,7 +318,12 @@ The policy controls what the agent asks servers to do. These checks cover the ot
 
 The first time portcullis runs a server, it records the definition of each of its tools (description, title, schemas and annotations) in `portcullis.pins.json`. If a server later changes a tool, the tool is held back: it disappears from the client's tool list, and calls to it get an error (code `-32031`) explaining why and what to run. The change is recorded in the audit log as `tool/changed`.
 
-A server's first run is the only time it's trusted on sight. Everything it offers then is pinned. A tool, prompt or resource it adds after that, later in the session or on a later run, is held as new until you approve it: a server that adds a tool to read your SSH keys next week has to get past you first. Each pin records which server offered it.
+A server's first run is the only time it's trusted on sight. Everything it offers then is pinned. A tool, prompt or resource it adds after that, later in the session or on a later run, is held as new until you approve it: a server that adds a tool to read your SSH keys next week has to get past you first. Each pin records which server offered it. Some limits:
+
+- The first run itself is trusted. A server that is malicious from the start gets its first definitions pinned, as with any trust on first use.
+- A server is known by its name in the config, so renaming one gives it a new first run.
+- A server that offers nothing on its first run leaves nothing in the pin file, so its next run counts as its first.
+- If a server's first run fails partway, say its prompts were listed but its resources weren't, what wasn't listed is held as new on the next run. Approve it with `portcullis pin approve`.
 
 Prompts and resources are pinned the same way, since a client can show the model their descriptions too. A server could offer a harmless `summarize` prompt, then change it to ask the user for a GitHub token in a new argument. In the pin file and the `portcullis pin` commands, a prompt goes by `prompt:<name>`, such as `prompt:docs__summarize`, and a resource by `resource:<uri>`, such as `resource:notes://meeting`. A held prompt fails `prompts/get` and a held resource fails `resources/read`, both with the same error code. They're recorded with the same `tool/...` audit methods, under those names.
 
