@@ -63,7 +63,7 @@ func TestRugPullIsHeldUntilApproved(t *testing.T) {
 	m := newUpstream("math")
 	addTextTool(m, "add", "Adds two numbers.", "4")
 	h := startWith(t, map[string]*mcp.Server{"m": m}, func(o *Options) {
-		o.Pins = pin.Open(pins, false)
+		o.Pins = pin.Open(pins, pin.TrustNew)
 		o.PinPoll = 20 * time.Millisecond
 	})
 	if got := h.toolNames(); !slices.Equal(got, []string{"m__add"}) {
@@ -99,7 +99,7 @@ func TestRugPullIsHeldUntilApproved(t *testing.T) {
 	}
 
 	// A person reviews and approves it from another process.
-	if _, err := pin.Open(pins, false).Approve([]string{"m__add"}); err != nil {
+	if _, err := pin.Open(pins, pin.TrustNew).Approve([]string{"m__add"}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "the approved tool to come back", func() bool { return toolDesc(h, "m__add") == poisoned })
@@ -112,7 +112,7 @@ func TestHoldNewTools(t *testing.T) {
 	m := newUpstream("math")
 	addTextTool(m, "add", "Adds two numbers.", "4")
 	h := startWith(t, map[string]*mcp.Server{"m": m}, func(o *Options) {
-		o.Pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), true)
+		o.Pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), pin.HoldNew)
 	})
 	if got := h.toolNames(); len(got) != 0 {
 		t.Fatalf("tools = %v, want none until approved", got)
