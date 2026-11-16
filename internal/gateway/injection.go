@@ -244,14 +244,22 @@ func resultText(res *mcp.CallToolResult) string {
 		}
 	}
 	// Structured content usually repeats the text; check the strings in it
-	// that the text doesn't already hold. Each string is checked as it is,
-	// not JSON-encoded, which would turn < into \u003c and line breaks into
-	// a backslash and an n, out of the patterns' reach.
+	// that aren't exact repeats of a text part, a line of one, or each
+	// other. Each string is checked as it is, not JSON-encoded, which would
+	// turn < into \u003c and line breaks into a backslash and an n, out of
+	// the patterns' reach. Only exact repeats are skipped: searching the
+	// text for every string would let a server make each check scan a
+	// large text.
 	if res.StructuredContent != nil {
-		joined := strings.Join(parts, "\n")
 		seen := map[string]bool{}
+		for _, p := range parts {
+			seen[p] = true
+			for line := range strings.Lines(p) {
+				seen[strings.TrimSuffix(line, "\n")] = true
+			}
+		}
 		for _, s := range structuredStrings(res.StructuredContent) {
-			if s != "" && !seen[s] && !strings.Contains(joined, s) {
+			if s != "" && !seen[s] {
 				seen[s] = true
 				parts = append(parts, s)
 			}

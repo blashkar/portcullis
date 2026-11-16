@@ -137,7 +137,7 @@ func TestResultText(t *testing.T) {
 		t.Errorf("resultText = %q", got)
 	}
 	same := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"x":1}`}}, StructuredContent: map[string]any{"x": 1}}
-	if got := resultText(same); got != `{"x":1}` {
+	if got := resultText(same); got != "{\"x\":1}\nx" {
 		t.Errorf("duplicate structured content: %q", got)
 	}
 }

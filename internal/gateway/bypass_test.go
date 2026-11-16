@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,7 +22,7 @@ func addResultTool(s *mcp.Server, name string, res *mcp.CallToolResult) {
 }
 
 // Injections that are only in structuredContent. Encoded as JSON, the
-// first would read <|im_start|> and the second would have a
+// first would read \u003c|im_start|\u003e and the second would have a
 // literal backslash-n where the pattern needs whitespace.
 func TestStructuredContentIsCheckedAsText(t *testing.T) {
 	for name, payload := range map[string]string{
@@ -53,6 +55,24 @@ func TestResultTextWalksStructuredContent(t *testing.T) {
 	// holds isn't repeated.
 	if got := resultText(res); got != "a\nshared\nz\n<b>\nk\nx\ny" {
 		t.Errorf("resultText = %q", got)
+	}
+}
+
+// A server can send a large text and many short structured strings that
+// aren't in it. Searching the text for each one took seconds per call.
+func TestResultTextIsLinear(t *testing.T) {
+	items := make([]any, 100_000)
+	for i := range items {
+		items[i] = fmt.Sprintf("item-%08d", i)
+	}
+	res := &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: strings.Repeat("abcdefgh ", 4<<20/9)}},
+		StructuredContent: map[string]any{"items": items},
+	}
+	start := time.Now()
+	resultText(res)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("resultText took %v", d)
 	}
 }
 
