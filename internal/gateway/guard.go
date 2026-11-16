@@ -337,6 +337,11 @@ func (g *Gateway) redactContent(content []mcp.Content, counts redact.Counts) {
 			c.Text = g.redactString(c.Text, counts)
 		case *mcp.EmbeddedResource:
 			g.redactResourceContents(c.Resource, counts)
+		case *mcp.ResourceLink:
+			c.URI = g.redactString(c.URI, counts)
+			c.Name = g.redactString(c.Name, counts)
+			c.Title = g.redactString(c.Title, counts)
+			c.Description = g.redactString(c.Description, counts)
 		}
 	}
 }
