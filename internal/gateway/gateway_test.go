@@ -408,15 +408,12 @@ func TestCloseIsNotAFailure(t *testing.T) {
 	if err := h.gw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "both upstreams to be recorded as closed", func() bool {
-		n := 0
-		for _, name := range []string{"fs", "git"} {
-			if _, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "upstream/closed" && e.Upstream == name && !e.IsError }); ok {
-				n++
-			}
+	// Recorded by the time Close returns, while the audit log is open.
+	for _, name := range []string{"fs", "git"} {
+		if _, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "upstream/closed" && e.Upstream == name && !e.IsError }); !ok {
+			t.Errorf("%s's close wasn't recorded when Close returned", name)
 		}
-		return n == 2
-	})
+	}
 	if _, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "upstream/disconnected" }); ok {
 		t.Error("a clean shutdown was recorded as a disconnect")
 	}

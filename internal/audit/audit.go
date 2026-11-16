@@ -220,6 +220,13 @@ const insertEvent = `INSERT INTO events (session_id, time_ns, direction, upstrea
                     decision, rule, reason, would_decision, would_rule, findings, withheld)
  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
+// trim truncates an event's text fields as storing it would.
+func (s *Store) trim(e Event) Event {
+	e.Params, e.Result, e.Error = s.truncate(e.Params), s.truncate(e.Result), s.truncate(e.Error)
+	e.Reason, e.Findings, e.Withheld = s.truncate(e.Reason), s.truncate(e.Findings), s.truncate(e.Withheld)
+	return e
+}
+
 // RecordBatch stores events in one transaction: all of them or none.
 func (s *Store) RecordBatch(ctx context.Context, events []Event) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -248,9 +255,16 @@ func (s *Store) RecordBatch(ctx context.Context, events []Event) error {
 // between them, even when a large old log is pruned for the first time.
 const pruneChunk = 2000
 
-// Prune deletes the events from before t, and the sessions that started
-// before t and have no events left. It returns how many of each it deleted.
-func (s *Store) Prune(ctx context.Context, t time.Time) (events, sessions int64, err error) {
+// crashedAfter is how long before Prune's cutoff a session that never
+// ended must have started for Prune to treat it as crashed. A session that
+// is still running, however long idle, keeps its row: its events need it.
+const crashedAfter = 30 * 24 * time.Hour
+
+// Prune deletes the events from before t, and the sessions with no events
+// left that ended before t, or that never ended and started long before
+// it, which means they crashed. The sessions named in keep, such as the
+// caller's own, are never deleted. It returns how many of each it deleted.
+func (s *Store) Prune(ctx context.Context, t time.Time, keep ...string) (events, sessions int64, err error) {
 	for {
 		res, err := s.db.ExecContext(ctx,
 			`DELETE FROM events WHERE id IN (SELECT id FROM events WHERE time_ns < ? LIMIT ?)`, t.UnixNano(), pruneChunk)
@@ -263,8 +277,17 @@ func (s *Store) Prune(ctx context.Context, t time.Time) (events, sessions int64,
 			break
 		}
 	}
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE started_ns < ? AND NOT EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.id)`, t.UnixNano())
+	q := `DELETE FROM sessions
+	      WHERE (ended_ns < ? OR ended_ns IS NULL AND started_ns < ?)
+	        AND NOT EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.id)`
+	args := []any{t.UnixNano(), t.Add(-crashedAfter).UnixNano()}
+	if len(keep) > 0 {
+		q += ` AND id NOT IN (?` + strings.Repeat(", ?", len(keep)-1) + `)`
+		for _, id := range keep {
+			args = append(args, id)
+		}
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
 		return events, 0, err
 	}
@@ -280,6 +303,9 @@ const truncatedMarker = "…[truncated]"
 func (s *Store) truncate(v string) string {
 	if s.maxPayload <= 0 || len(v) <= s.maxPayload {
 		return v
+	}
+	if strings.HasSuffix(v, truncatedMarker) && len(v) <= s.maxPayload+len(truncatedMarker) {
+		return v // cut already, when it was queued
 	}
 	n := s.maxPayload
 	for n > 0 && !utf8.RuneStart(v[n]) {

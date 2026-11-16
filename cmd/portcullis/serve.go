@@ -155,7 +155,7 @@ func runServe(ctx context.Context, opts serveOptions) error {
 		queue := audit.NewQueue(store, auditQueueSize, func(err error) { log.Error("writing the audit log", "err", err) })
 		defer queue.Close()
 		if keep := cfg.Retention(); keep > 0 {
-			stop := pruneAudit(ctx, store, keep, log)
+			stop := pruneAudit(ctx, store, keep, sessionID, log)
 			defer stop()
 		}
 		gwOpts.Recorder = queue
@@ -433,7 +433,8 @@ const auditPruneEvery = time.Hour
 
 // pruneAudit deletes events older than keep now and every auditPruneEvery,
 // until the returned function is called; it waits for a prune in progress.
-func pruneAudit(ctx context.Context, store *audit.Store, keep time.Duration, log *slog.Logger) (stop func()) {
+// The running session's row is kept, however long it has been idle.
+func pruneAudit(ctx context.Context, store *audit.Store, keep time.Duration, sessionID string, log *slog.Logger) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -441,7 +442,7 @@ func pruneAudit(ctx context.Context, store *audit.Store, keep time.Duration, log
 		t := time.NewTicker(auditPruneEvery)
 		defer t.Stop()
 		for {
-			events, sessions, err := store.Prune(ctx, time.Now().Add(-keep))
+			events, sessions, err := store.Prune(ctx, time.Now().Add(-keep), sessionID)
 			switch {
 			case err != nil && ctx.Err() == nil:
 				log.Error("audit: deleting old events", "err", err)

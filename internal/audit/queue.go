@@ -43,6 +43,8 @@ func (q *Queue) Record(ctx context.Context, e Event) error {
 	if q.closed {
 		return ErrClosed
 	}
+	// Cut it now, so what waits in the queue is bounded too.
+	e = q.store.trim(e)
 	select {
 	case q.ch <- e:
 		return nil

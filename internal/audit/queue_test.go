@@ -95,6 +95,12 @@ func TestPrune(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Both ended before the cutoff; "spanning" too, but it has an event left.
+	for _, id := range []string{"old", "empty-old", "spanning"} {
+		if err := s.EndSession(ctx, id, before); err != nil {
+			t.Fatal(err)
+		}
+	}
 	events, sessions, err := s.Prune(ctx, cutoff)
 	if err != nil || events != 2 || sessions != 2 {
 		t.Fatalf("Prune = %d events, %d sessions, %v; want 2, 2", events, sessions, err)
@@ -177,8 +183,66 @@ func TestPruneInChunks(t *testing.T) {
 	if err := s.RecordBatch(ctx, events); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.EndSession(ctx, "old", old.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	n, sessions, err := s.Prune(ctx, old.Add(time.Hour))
 	if err != nil || n != int64(len(events)) || sessions != 1 {
 		t.Errorf("Prune = %d, %d, %v", n, sessions, err)
+	}
+}
+
+// A session that is still running keeps its row however long it has been
+// idle, so its later events can still be recorded.
+func TestPruneKeepsRunningSessions(t *testing.T) {
+	s, _ := openTestStore(t, 0)
+	ctx := context.Background()
+	now := time.Now()
+	startSession(t, s, "live", now.Add(-2*time.Hour))
+	startSession(t, s, "ended", now.Add(-3*time.Hour))
+	startSession(t, s, "crashed", now.Add(-60*24*time.Hour)) // never ended
+	for _, id := range []string{"live", "ended"} {
+		if err := s.Record(ctx, Event{SessionID: id, Time: now.Add(-2 * time.Hour), Direction: ClientToServer, Method: "m"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.EndSession(ctx, "ended", now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, sessions, err := s.Prune(ctx, now.Add(-time.Hour)); err != nil || sessions != 2 {
+		t.Errorf("Prune deleted %d sessions, %v; want ended and crashed", sessions, err)
+	}
+	if err := s.Record(ctx, Event{SessionID: "live", Time: now, Direction: ClientToServer, Method: "m"}); err != nil {
+		t.Errorf("recording for the running session after a prune: %v", err)
+	}
+}
+
+func TestPruneKeepsNamedSessions(t *testing.T) {
+	s, _ := openTestStore(t, 0)
+	ctx := context.Background()
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	startSession(t, s, "mine", old) // never ended, long idle
+	startSession(t, s, "other", old)
+	if _, sessions, err := s.Prune(ctx, time.Now(), "mine"); err != nil || sessions != 1 {
+		t.Errorf("Prune = %d sessions, %v", sessions, err)
+	}
+	if err := s.Record(ctx, Event{SessionID: "mine", Time: time.Now(), Direction: ClientToServer, Method: "m"}); err != nil {
+		t.Errorf("the kept session: %v", err)
+	}
+}
+
+// Events are cut when queued, so a stalled disk can't pile up full-size
+// results, and cutting them again when written leaves them as they are.
+func TestQueueTruncatesOnce(t *testing.T) {
+	s, _ := openTestStore(t, 10)
+	startSession(t, s, "s", time.Now())
+	q := NewQueue(s, 1, nil)
+	if err := q.Record(context.Background(), Event{SessionID: "s", Time: time.Now(), Direction: ClientToServer, Method: "m", Result: strings.Repeat("r", 100)}); err != nil {
+		t.Fatal(err)
+	}
+	q.Close()
+	got, _ := s.Events(context.Background(), Filter{})
+	if len(got) != 1 || got[0].Result != strings.Repeat("r", 10)+truncatedMarker {
+		t.Errorf("result = %q", got[0].Result)
 	}
 }
