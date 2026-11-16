@@ -116,6 +116,27 @@ func TestValue(t *testing.T) {
 	}
 }
 
+// Keys reach the model too, and a server can use a secret as one.
+func TestValueRedactsKeys(t *testing.T) {
+	v := map[string]any{ghToken: "repo", "plain": map[string]any{"GH=" + ghToken: 1.0}}
+	counts := Counts{}
+	New().Value(v, counts)
+	if v["[REDACTED:github_token]"] != "repo" || v["plain"].(map[string]any)["GH=[REDACTED:github_token]"] != 1.0 || len(v) != 2 {
+		t.Errorf("value = %v", v)
+	}
+	if counts.String() != "github_token" {
+		t.Errorf("counts = %v", counts)
+	}
+
+	// Two secrets that redact to the same key both keep their values.
+	other := "ghp_" + strings.Repeat("z9Y8", 9)
+	v = map[string]any{ghToken: "a", other: "b"}
+	New().Value(v, Counts{})
+	if len(v) != 2 || v["[REDACTED:github_token]"] == nil || v["[REDACTED:github_token]#2"] == nil {
+		t.Errorf("value = %v", v)
+	}
+}
+
 func TestNilRedactor(t *testing.T) {
 	var r *Redactor
 	if got, c := r.String(ghToken); got != ghToken || c != nil {

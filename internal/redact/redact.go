@@ -126,8 +126,8 @@ func (r *Redactor) String(s string) (string, Counts) {
 	return s, counts
 }
 
-// Value redacts every string in a decoded JSON value, in place where it
-// can, and returns the result.
+// Value redacts every string in a decoded JSON value, map keys included,
+// in place where it can, and returns the result.
 func (r *Redactor) Value(v any, counts Counts) any {
 	switch v := v.(type) {
 	case string:
@@ -135,8 +135,27 @@ func (r *Redactor) Value(v any, counts Counts) any {
 		counts.Add(c)
 		return out
 	case map[string]any:
+		// Keys reach the model too. Collect the renames first: changing
+		// keys while ranging over the map could visit one twice.
+		renames := map[string]string{}
 		for k, x := range v {
 			v[k] = r.Value(x, counts)
+			if out, c := r.String(k); out != k {
+				counts.Add(c)
+				renames[k] = out
+			}
+		}
+		for _, k := range slices.Sorted(maps.Keys(renames)) {
+			out := renames[k]
+			// Two secrets can redact to the same key; keep both values.
+			for n := 2; ; n++ {
+				if _, taken := v[out]; !taken {
+					break
+				}
+				out = fmt.Sprintf("%s#%d", renames[k], n)
+			}
+			v[out] = v[k]
+			delete(v, k)
 		}
 		return v
 	case []any:

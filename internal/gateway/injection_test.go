@@ -133,7 +133,7 @@ func TestResultText(t *testing.T) {
 		Content:           []mcp.Content{&mcp.TextContent{Text: "a"}, &mcp.EmbeddedResource{Resource: &mcp.ResourceContents{Text: "b"}}},
 		StructuredContent: map[string]any{"note": "hidden in structured content"},
 	}
-	if got := resultText(res); got != "a\nb\n{\"note\":\"hidden in structured content\"}" {
+	if got := resultText(res); got != "a\nb\nnote\nhidden in structured content" {
 		t.Errorf("resultText = %q", got)
 	}
 	same := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"x":1}`}}, StructuredContent: map[string]any{"x": 1}}
