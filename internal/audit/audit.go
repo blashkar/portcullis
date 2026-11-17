@@ -57,6 +57,38 @@ type Event struct {
 	HasWithheld bool
 }
 
+// Methods of the events recorded when portcullis checks the definition of
+// a tool, prompt or resource a server offers; Tool is its pin key.
+const (
+	DefinitionPinned  = "definition/pinned"  // first seen, and pinned
+	DefinitionChanged = "definition/changed" // differs from what was pinned
+	DefinitionHeld    = "definition/held"    // held back for another reason
+	DefinitionFlagged = "definition/flagged" // the scanner found something
+)
+
+// oldMethods maps names that earlier versions recorded to today's.
+var oldMethods = map[string]string{
+	"tool/pinned":  DefinitionPinned,
+	"tool/changed": DefinitionChanged,
+	"tool/held":    DefinitionHeld,
+	"tool/flagged": DefinitionFlagged,
+}
+
+// methodNames returns the names a method may be stored under: its own,
+// and the one earlier versions used, if any.
+func methodNames(m string) []string {
+	if cur, ok := oldMethods[m]; ok {
+		m = cur
+	}
+	names := []string{m}
+	for old, cur := range oldMethods {
+		if cur == m {
+			names = append(names, old)
+		}
+	}
+	return names
+}
+
 // DecisionHeld is the decision recorded for a call to a tool that is held
 // back because its definition changed, wasn't approved, or looks poisoned.
 const DecisionHeld = "held"
@@ -375,7 +407,12 @@ func (s *Store) events(ctx context.Context, f Filter, withheld bool) ([]Event, e
 		add("tool = ?", f.Tool)
 	}
 	if f.Method != "" {
-		add("method = ?", f.Method)
+		// Earlier versions' names for it too, so old events still match.
+		names := methodNames(f.Method)
+		where = append(where, "method IN (?"+strings.Repeat(", ?", len(names)-1)+")")
+		for _, n := range names {
+			args = append(args, n)
+		}
 	}
 	if f.Upstream != "" {
 		add("upstream = ?", f.Upstream)
@@ -431,6 +468,9 @@ func (s *Store) events(ctx context.Context, f Filter, withheld bool) ([]Event, e
 			return nil, err
 		}
 		e.Time, e.Duration = time.Unix(0, t), time.Duration(d)
+		if cur, ok := oldMethods[e.Method]; ok {
+			e.Method = cur
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()

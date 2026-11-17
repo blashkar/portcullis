@@ -27,7 +27,7 @@ func TestSecurityPage(t *testing.T) {
 	f.feed.Observe(denied, gateway.Details{})
 	f.feed.Observe(call("cfg__read", `{}`, textResult("key: [REDACTED:aws_access_key]")), gateway.Details{Redacted: map[string]int{"aws_access_key": 1}})
 	f.feed.Observe(audit.Event{
-		Method: "tool/held", Direction: audit.Internal, Tool: "evil__notes", Reason: "its definition looks like tool poisoning",
+		Method: "definition/held", Direction: audit.Internal, Tool: "evil__notes", Reason: "its definition looks like tool poisoning",
 		Findings: "high hidden-instructions in description: \"<IMPORTANT>\"",
 	}, gateway.Details{})
 
@@ -223,7 +223,7 @@ func TestDetailsFromAudit(t *testing.T) {
 			audit.Event{Method: "tools/call", Decision: "require_approval", Reason: "nobody answered in time"},
 			gateway.Details{Approval: "expired"},
 		},
-		{audit.Event{Method: "tool/flagged", Findings: `medium secrets in description: "env"`}, gateway.Details{}},
+		{audit.Event{Method: "definition/flagged", Findings: `medium secrets in description: "env"`}, gateway.Details{}},
 	} {
 		got := detailsFromAudit(c.e)
 		if got.Injection != c.want.Injection || got.Withheld != c.want.Withheld || got.Suspicious != c.want.Suspicious ||

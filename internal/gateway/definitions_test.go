@@ -80,7 +80,7 @@ func TestPromptRugPullIsHeldUntilApproved(t *testing.T) {
 	if err := h.getPrompt("d__summarize"); err != nil {
 		t.Fatal(err)
 	}
-	if h.rec.count(func(e audit.Event) bool { return e.Method == "tool/pinned" && e.Tool == "prompt:d__summarize" }) != 1 {
+	if h.rec.count(func(e audit.Event) bool { return e.Method == "definition/pinned" && e.Tool == "prompt:d__summarize" }) != 1 {
 		t.Error("first sight wasn't recorded")
 	}
 
@@ -95,7 +95,7 @@ func TestPromptRugPullIsHeldUntilApproved(t *testing.T) {
 	if !strings.Contains(msg, "prompt:d__summarize is held back") || !strings.Contains(msg, "portcullis pin approve prompt:d__summarize") {
 		t.Errorf("message = %s", msg)
 	}
-	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/changed" })
+	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/changed" })
 	if !ok || e.Tool != "prompt:d__summarize" || e.Upstream != "d" || !strings.Contains(e.Params, "github_token") {
 		t.Errorf("changed event = %+v", e)
 	}
@@ -203,7 +203,7 @@ func TestPoisonedPromptsAndResourcesAreHidden(t *testing.T) {
 	if msg := heldError(t, h.readResource("notes://meeting")); !strings.Contains(msg, "invisible-text") {
 		t.Errorf("message = %s", msg)
 	}
-	if e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/held" && e.Tool == "resource:notes://meeting" }); !ok || !strings.Contains(e.Params, `"kind":"resource"`) {
+	if e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/held" && e.Tool == "resource:notes://meeting" }); !ok || !strings.Contains(e.Params, `"kind":"resource"`) {
 		t.Errorf("held event = %+v", e)
 	}
 }

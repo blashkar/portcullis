@@ -37,7 +37,7 @@ func TestHoldAfterFirstRun(t *testing.T) {
 	if p, r := h.promptNames(), h.resourceURIs(); len(p) != 1 || len(r) != 1 {
 		t.Errorf("prompts = %v, resources = %v; want the first run's pinned", p, r)
 	}
-	if n := h.rec.count(func(e audit.Event) bool { return e.Method == "tool/pinned" }); n != 3 {
+	if n := h.rec.count(func(e audit.Event) bool { return e.Method == "definition/pinned" }); n != 3 {
 		t.Errorf("%d pinned events, want 3", n)
 	}
 

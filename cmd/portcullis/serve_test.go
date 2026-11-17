@@ -300,7 +300,7 @@ func TestServeHoldsChangedTools(t *testing.T) {
 		t.Errorf("after approval: tools %v, call %v", tools, results)
 	}
 
-	out, err := exec.Command(bin, "audit", "--db", dbPath, "--session", "all", "--method", "tool/changed").Output()
+	out, err := exec.Command(bin, "audit", "--db", dbPath, "--session", "all", "--method", "definition/changed").Output()
 	if err != nil || !strings.Contains(string(out), "alpha__whoami") || !strings.Contains(string(out), "held") {
 		t.Errorf("audit of the change: %v\n%s", err, out)
 	}

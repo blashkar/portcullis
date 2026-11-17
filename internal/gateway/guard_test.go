@@ -72,8 +72,8 @@ func TestRugPullIsHeldUntilApproved(t *testing.T) {
 	if _, err := h.call("m__add", nil); err != nil {
 		t.Fatal(err)
 	}
-	if h.rec.count(func(e audit.Event) bool { return e.Method == "tool/pinned" && e.Tool == "m__add" }) != 1 {
-		t.Error("first sight wasn't recorded as tool/pinned")
+	if h.rec.count(func(e audit.Event) bool { return e.Method == "definition/pinned" && e.Tool == "m__add" }) != 1 {
+		t.Error("first sight wasn't recorded as definition/pinned")
 	}
 
 	// The server swaps the description mid-session.
@@ -84,9 +84,9 @@ func TestRugPullIsHeldUntilApproved(t *testing.T) {
 	if msg := heldError(t, err); !strings.Contains(msg, "definition changed since it was approved") || !strings.Contains(msg, "portcullis pin approve m__add") {
 		t.Errorf("message = %s", msg)
 	}
-	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/changed" })
+	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/changed" })
 	if !ok || e.Tool != "m__add" || e.Upstream != "m" || !e.IsError || !strings.Contains(e.Params, "IMPORTANT") {
-		t.Errorf("tool/changed event = %+v", e)
+		t.Errorf("definition/changed event = %+v", e)
 	}
 	if e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tools/call" && e.Decision == audit.DecisionHeld }); !ok || !strings.Contains(e.Reason, "changed") {
 		t.Errorf("the held call's event = %+v", e)
@@ -143,9 +143,9 @@ func TestPoisonedToolsAreHidden(t *testing.T) {
 	if msg := heldError(t, err); !strings.Contains(msg, "looks like tool poisoning") || !strings.Contains(msg, "scan.ignore") {
 		t.Errorf("message = %s", msg)
 	}
-	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/held" })
+	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/held" })
 	if !ok || e.Tool != "m__add" || !strings.Contains(e.Findings, "hidden-instructions") || !strings.Contains(e.Findings, "sensitive-path") {
-		t.Errorf("tool/held event = %+v", e)
+		t.Errorf("definition/held event = %+v", e)
 	}
 	if h.rec.count(func(e audit.Event) bool { return e.Tool == "m__sub" && e.Method != "tools/call" }) != 0 {
 		t.Error("the clean tool was reported")
@@ -159,8 +159,8 @@ func TestScanLogOnly(t *testing.T) {
 	if got := h.toolNames(); len(got) != 2 {
 		t.Fatalf("tools = %v, want both offered", got)
 	}
-	if e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/flagged" }); !ok || e.Tool != "m__add" || e.IsError {
-		t.Errorf("tool/flagged event = %+v", e)
+	if e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/flagged" }); !ok || e.Tool != "m__add" || e.IsError {
+		t.Errorf("definition/flagged event = %+v", e)
 	}
 }
 
@@ -184,17 +184,17 @@ func TestCrossToolMentionsAfterResync(t *testing.T) {
 	h := startWith(t, map[string]*mcp.Server{"a": a, "z": z}, func(o *Options) {
 		o.Scan = ScanOptions{Enabled: true, Hide: true}
 	})
-	if _, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/flagged" }); ok {
+	if _, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/flagged" }); ok {
 		t.Fatal("flagged before all servers were known")
 	}
 	h.gw.Resync(h.ctx)
-	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "tool/flagged" })
+	e, ok := h.rec.find(func(e audit.Event) bool { return e.Method == "definition/flagged" })
 	if !ok || e.Tool != "a__helper" || !strings.Contains(e.Findings, "cross-tool") {
 		t.Errorf("event = %+v", e)
 	}
 	// Medium findings are reported, not hidden, and only once.
 	h.gw.Resync(h.ctx)
-	if n := h.rec.count(func(e audit.Event) bool { return e.Method == "tool/flagged" }); n != 1 || len(h.toolNames()) != 2 {
+	if n := h.rec.count(func(e audit.Event) bool { return e.Method == "definition/flagged" }); n != 1 || len(h.toolNames()) != 2 {
 		t.Errorf("%d reports, tools %v", n, h.toolNames())
 	}
 }
