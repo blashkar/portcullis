@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,45 +78,13 @@ type offering struct {
 	scan func() []scan.Finding // the scanner's findings
 }
 
-// checkTools pins and scans the tools an upstream offers, keyed by their
-// client-facing names. others are the other upstreams' tool names.
-func (g *Gateway) checkTools(ctx context.Context, upstream string, tools map[string]*mcp.Tool, others []string) (map[string]toolCheck, error) {
-	offered := make(map[string]offering, len(tools))
-	for name, t := range tools {
-		offered[name] = offering{def: pin.FromTool(t), scan: func() []scan.Finding { return scan.Tool(t, others) }}
-	}
-	return g.check(ctx, upstream, offered)
-}
-
-// checkPrompts pins and scans the prompts an upstream offers, keyed by
-// their client-facing names. The result is keyed by pin key.
-func (g *Gateway) checkPrompts(ctx context.Context, upstream string, prompts map[string]*mcp.Prompt, others []string) (map[string]toolCheck, error) {
-	offered := make(map[string]offering, len(prompts))
-	for _, p := range prompts {
-		def := pin.FromPrompt(p)
-		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Prompt(p, others) }}
-	}
-	return g.check(ctx, upstream, offered)
-}
-
-// checkResources pins and scans the resources an upstream offers, keyed by
-// URI. The result is keyed by pin key.
-func (g *Gateway) checkResources(ctx context.Context, upstream string, resources map[string]*mcp.Resource, others []string) (map[string]toolCheck, error) {
-	offered := make(map[string]offering, len(resources))
-	for _, r := range resources {
-		def := pin.FromResource(r)
-		offered[def.Key()] = offering{def: def, scan: func() []scan.Finding { return scan.Resource(r, others) }}
-	}
-	return g.check(ctx, upstream, offered)
-}
-
 // firstRunKey marks the context of the first listing of a server the pin
 // file has nothing from, whose definitions HoldAfterFirst pins.
 type firstRunKey struct{}
 
 // check pins and scans what an upstream offers, keyed by pin key, and says
 // which of it to hold back.
-func (g *Gateway) check(ctx context.Context, upstream string, offered map[string]offering) (map[string]toolCheck, error) {
+func (g *Gateway) check(ctx context.Context, u *upstream, offered map[string]offering) (map[string]toolCheck, error) {
 	out := make(map[string]toolCheck, len(offered))
 	var statuses map[string]pin.Status
 	if g.opts.Pins != nil {
@@ -124,7 +93,7 @@ func (g *Gateway) check(ctx context.Context, upstream string, offered map[string
 			defs[key] = o.def
 		}
 		var err error
-		if statuses, err = g.opts.Pins.Check(upstream, ctx.Value(firstRunKey{}) == true, defs); err != nil {
+		if statuses, err = g.opts.Pins.Check(u.name, ctx.Value(firstRunKey{}) == true, defs); err != nil {
 			return nil, err
 		}
 	}
@@ -143,7 +112,7 @@ func (g *Gateway) check(ctx context.Context, upstream string, offered map[string
 		case sc.Hide && scan.Max(c.findings) == scan.High:
 			c.held = "its definition looks like tool poisoning (" + firstHigh(c.findings).String() + "); if you trust it, add it to scan.ignore in the config"
 		}
-		g.reportTool(upstream, key, o.def, c)
+		g.report(u, key, o.def, c)
 		out[key] = c
 	}
 	return out, nil
@@ -158,30 +127,28 @@ func firstHigh(fs []scan.Finding) scan.Finding {
 	return scan.Finding{}
 }
 
-// reportTool logs and records what checking a tool, prompt or resource
-// found, once per definition: a server re-listing them doesn't repeat the
-// report. Prompts and resources are reported with the same methods as
-// tools, under their pin keys.
-func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCheck) {
+// maxReports is how many reports the gateway remembers per definition
+// name, so a server flipping between versions isn't reported each time.
+const maxReports = 4
+
+// report logs and records what checking a tool, prompt or resource found,
+// once per version of its definition: a server re-listing it doesn't
+// repeat the report.
+func (g *Gateway) report(u *upstream, name string, def pin.Definition, c toolCheck) {
 	var method string
 	switch {
 	case c.status == pin.Changed:
-		method = "tool/changed"
+		method = audit.DefinitionChanged
 	case c.held != "":
-		method = "tool/held"
+		method = audit.DefinitionHeld
 	case len(c.findings) > 0:
-		method = "tool/flagged"
+		method = audit.DefinitionFlagged
 	case c.status == pin.Pinned:
-		method = "tool/pinned"
+		method = audit.DefinitionPinned
 	default:
 		return
 	}
-	key := method + "|" + name + "|" + def.Hash()
-	g.mu.Lock()
-	seen := g.reported[key]
-	g.reported[key] = true
-	g.mu.Unlock()
-	if seen {
+	if g.reportedBefore(u, name, method+"|"+def.Hash()) {
 		return
 	}
 
@@ -190,13 +157,13 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 		findings = append(findings, f.String())
 	}
 	e := audit.Event{
-		Time: time.Now(), Direction: audit.Internal, Upstream: upstream, Method: method, Tool: name,
+		Time: time.Now(), Direction: audit.Internal, Upstream: u.name, Method: method, Tool: name,
 		Reason: c.held, Findings: strings.Join(findings, "; "), IsError: c.held != "",
 	}
-	if method != "tool/pinned" && (g.opts.Recorder != nil || g.opts.Observer != nil) {
+	if method != audit.DefinitionPinned && (g.opts.Recorder != nil || g.opts.Observer != nil) {
 		e.Params = marshal(def)
 	}
-	attrs := []any{"upstream", upstream, pin.KindOf(name), name}
+	attrs := []any{"upstream", u.name, pin.KindOf(name), name}
 	if c.held != "" {
 		attrs = append(attrs, "reason", c.held)
 	}
@@ -206,12 +173,42 @@ func (g *Gateway) reportTool(upstream, name string, def pin.Definition, c toolCh
 	switch {
 	case c.held != "":
 		g.log.Warn(pin.KindOf(name)+" held back", attrs...)
-	case method == "tool/flagged":
+	case method == audit.DefinitionFlagged:
 		g.log.Warn(pin.KindOf(name)+" definition flagged", attrs...)
 	default:
 		g.log.Info(pin.KindOf(name)+" pinned", attrs...)
 	}
 	g.record(context.Background(), e, Details{})
+}
+
+// reportedBefore reports whether report was already made for name, and
+// remembers it if not. It keeps the last maxReports reports per name.
+func (g *Gateway) reportedBefore(u *upstream, name, report string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	past := u.reported[name]
+	if slices.Contains(past, report) {
+		return true
+	}
+	if len(past) == maxReports {
+		past = past[1:]
+	}
+	if u.reported == nil {
+		u.reported = map[string][]string{}
+	}
+	u.reported[name] = append(slices.Clip(past), report)
+	return false
+}
+
+// forgetReports forgets the reports about definitions of kind the upstream
+// no longer lists, so what is remembered is bounded by what it lists now.
+// g.mu must be held.
+func (g *Gateway) forgetReports(u *upstream, kind string, listed map[string]offering) {
+	for name := range u.reported {
+		if _, ok := listed[name]; !ok && pin.KindOf(name) == kind {
+			delete(u.reported, name)
+		}
+	}
 }
 
 // guard is receiving middleware that refuses to call held tools, get held

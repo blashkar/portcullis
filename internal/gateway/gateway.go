@@ -94,8 +94,6 @@ type Gateway struct {
 	// exits tracks the goroutines that handle upstreams exiting, so Close
 	// can wait for them to record it.
 	exits sync.WaitGroup
-	// reported holds the tool reports already made, so each is made once.
-	reported map[string]bool
 	// inFlight counts, per upstream, the progress tokens of requests
 	// waiting on it; progress notifications for others are dropped.
 	inFlight     map[string]map[string]int
@@ -114,6 +112,9 @@ type upstream struct {
 	names     []string          // every tool's name as the server gives it
 	prompts   map[string]bool
 	resources map[string]bool // URIs
+	// reported holds, by pin key, the last few reports made about each
+	// definition, so they aren't repeated. g.mu guards it.
+	reported map[string][]string
 }
 
 // New returns a Gateway with no upstreams.
@@ -126,7 +127,6 @@ func New(opts Options) *Gateway {
 		log:       opts.Logger,
 		upstreams: map[string]*upstream{},
 		resources: map[string]string{},
-		reported:  map[string]bool{},
 
 		inFlight:     map[string]map[string]int{},
 		progressRate: map[string]*rateWindow{},
@@ -190,20 +190,7 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 	g.upstreams[name] = u
 	g.mu.Unlock()
 
-	// Only this first listing may pin what a new server offers; anything
-	// it adds later, in a refresh, is held.
-	first := ctx
-	if g.opts.Pins != nil && g.opts.Pins.Mode() == pin.HoldAfterFirst {
-		seen, err := g.opts.Pins.Seen(name, ownedBy(name))
-		if err != nil {
-			return fmt.Errorf("listing %s's features: %w", name, err)
-		}
-		if !seen {
-			first = context.WithValue(ctx, firstRunKey{}, true)
-			g.log.Info("first run of upstream: pinning what it offers", "upstream", name)
-		}
-	}
-	if err := errors.Join(g.syncTools(first, u), g.syncPrompts(first, u), g.syncResources(first, u)); err != nil {
+	if err := g.firstSync(ctx, u); err != nil {
 		// Don't leave half an upstream behind: what was added would be
 		// offered with nothing to answer it, and the process would run on.
 		_ = session.Close()
@@ -221,6 +208,23 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 	})
 	g.log.Info("upstream connected", "upstream", name, "tools", len(u.tools), "prompts", len(u.prompts), "resources", len(u.resources))
 	return nil
+}
+
+// firstSync lists what a newly connected upstream offers. Only this first
+// listing may pin what a new server offers; anything it adds later, in a
+// refresh, is held.
+func (g *Gateway) firstSync(ctx context.Context, u *upstream) error {
+	if g.opts.Pins != nil && g.opts.Pins.Mode() == pin.HoldAfterFirst {
+		seen, err := g.opts.Pins.Seen(u.name, ownedBy(u.name))
+		if err != nil {
+			return err
+		}
+		if !seen {
+			ctx = context.WithValue(ctx, firstRunKey{}, true)
+			g.log.Info("first run of upstream: pinning what it offers", "upstream", u.name)
+		}
+	}
+	return errors.Join(g.syncTools(ctx, u), g.syncPrompts(ctx, u), g.syncResources(ctx, u))
 }
 
 // Serve serves one client over t until it disconnects or ctx is cancelled.
@@ -333,63 +337,6 @@ func splitName(name string) (upstream, original string, ok bool) {
 		return "", name, false
 	}
 	return upstream, original, true
-}
-
-func (g *Gateway) syncTools(ctx context.Context, u *upstream) error {
-	if u.caps == nil || u.caps.Tools == nil {
-		return nil
-	}
-	u.syncMu.Lock()
-	defer u.syncMu.Unlock()
-	s, err := g.session(u.name)
-	if err != nil {
-		return nil // it exited; upstreamExited cleans up
-	}
-
-	tools, full, err := collect(s.Tools(ctx, nil))
-	if err != nil {
-		return err
-	}
-	if !full {
-		g.tooLong(u.name, "tools")
-	}
-
-	offered := map[string]*mcp.Tool{}
-	var names []string
-	for _, t := range tools {
-		names = append(names, t.Name)
-		if !validObjectSchema(t.InputSchema) {
-			g.log.Warn("skipping tool with an invalid input schema", "upstream", u.name, "tool", t.Name)
-			continue
-		}
-		ft := *t
-		ft.Name = prefixed(u.name, t.Name)
-		offered[ft.Name] = &ft
-	}
-	g.mu.Lock()
-	u.names = names
-	g.mu.Unlock()
-
-	checks, err := g.checkTools(ctx, u.name, offered, g.otherToolNames(u.name))
-	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	held := map[string]string{}
-	for name, ft := range offered {
-		if r := checks[name].held; r != "" {
-			held[name] = r
-			continue
-		}
-		g.server.AddTool(ft, g.toolHandler(u.name, strings.TrimPrefix(name, u.name+config.Separator)))
-		seen[name] = true
-	}
-	g.server.RemoveTools(stale(u.tools, seen)...)
-	g.mu.Lock()
-	u.tools = seen
-	g.setHeld(u, "tool", held)
-	g.mu.Unlock()
-	return nil
 }
 
 // setHeld replaces the upstream's held definitions of one kind ("tool",
@@ -542,148 +489,6 @@ func (g *Gateway) needsApproval(d policy.Decision) bool {
 	return d.Action == policy.RequireApproval && !d.RateLimited && g.opts.Approver != nil
 }
 
-func (g *Gateway) syncPrompts(ctx context.Context, u *upstream) error {
-	if u.caps == nil || u.caps.Prompts == nil {
-		return nil
-	}
-	u.syncMu.Lock()
-	defer u.syncMu.Unlock()
-	s, err := g.session(u.name)
-	if err != nil {
-		return nil // it exited; upstreamExited cleans up
-	}
-
-	prompts, full, err := collect(s.Prompts(ctx, nil))
-	if err != nil {
-		return err
-	}
-	if !full {
-		g.tooLong(u.name, "prompts")
-	}
-	offered := map[string]*mcp.Prompt{}
-	originals := map[string]string{}
-	for _, p := range prompts {
-		fp := *p
-		fp.Name = prefixed(u.name, p.Name)
-		offered[fp.Name] = &fp
-		originals[fp.Name] = p.Name
-	}
-	checks, err := g.checkPrompts(ctx, u.name, offered, g.otherToolNames(u.name))
-	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	held := map[string]string{}
-	for name, fp := range offered {
-		key := pin.FromPrompt(fp).Key()
-		if r := checks[key].held; r != "" {
-			held[key] = r
-			continue
-		}
-		original := originals[name]
-		g.server.AddPrompt(fp, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			s, err := g.session(u.name)
-			if err != nil {
-				return nil, err
-			}
-			defer g.expectProgress(u.name, req.Params.GetProgressToken())()
-			res, err := s.GetPrompt(ctx, &mcp.GetPromptParams{Meta: req.Params.Meta, Name: original, Arguments: req.Params.Arguments})
-			g.redactPrompt(ctx, res)
-			if err != nil {
-				return nil, g.checkError(ctx, name, err)
-			}
-			if berr := g.checkPrompt(ctx, name, res); berr != nil {
-				return nil, berr
-			}
-			return res, nil
-		})
-		seen[name] = true
-	}
-	g.server.RemovePrompts(stale(u.prompts, seen)...)
-	g.mu.Lock()
-	u.prompts = seen
-	g.setHeld(u, pin.KindPrompt, held)
-	g.mu.Unlock()
-	return nil
-}
-
-func (g *Gateway) syncResources(ctx context.Context, u *upstream) error {
-	if u.caps == nil || u.caps.Resources == nil {
-		return nil
-	}
-	u.syncMu.Lock()
-	defer u.syncMu.Unlock()
-	s, err := g.session(u.name)
-	if err != nil {
-		return nil // it exited; upstreamExited cleans up
-	}
-
-	resources, full, err := collect(s.Resources(ctx, nil))
-	if err != nil {
-		return err
-	}
-	if !full {
-		g.tooLong(u.name, "resources")
-	}
-	// URIs aren't namespaced, so the first server to offer one keeps it.
-	offered := map[string]*mcp.Resource{}
-	for _, r := range resources {
-		g.mu.Lock()
-		owner, taken := g.resources[r.URI]
-		g.mu.Unlock()
-		if taken && owner != u.name {
-			g.log.Warn("skipping resource another server already offers", "upstream", u.name, "uri", r.URI, "owner", owner)
-			continue
-		}
-		offered[r.URI] = r
-	}
-	checks, err := g.checkResources(ctx, u.name, offered, g.otherToolNames(u.name))
-	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	held := map[string]string{}
-	for uri, r := range offered {
-		key := pin.FromResource(r).Key()
-		if reason := checks[key].held; reason != "" {
-			held[key] = reason
-			continue
-		}
-		g.mu.Lock()
-		owner, taken := g.resources[uri]
-		if !taken {
-			g.resources[uri] = u.name
-		}
-		g.mu.Unlock()
-		if taken && owner != u.name {
-			g.log.Warn("skipping resource another server already offers", "upstream", u.name, "uri", uri, "owner", owner)
-			continue
-		}
-		if err := addResource(g.server, r, g.resourceHandler(u.name)); err != nil {
-			g.log.Warn("skipping resource", "upstream", u.name, "uri", uri, "err", err)
-			if !taken {
-				g.mu.Lock()
-				delete(g.resources, uri)
-				g.mu.Unlock()
-			}
-			continue
-		}
-		seen[uri] = true
-	}
-	gone := stale(u.resources, seen)
-	g.server.RemoveResources(gone...)
-	g.mu.Lock()
-	for _, uri := range gone {
-		if g.resources[uri] == u.name {
-			delete(g.resources, uri)
-		}
-	}
-	u.resources = seen
-	g.setHeld(u, pin.KindResource, held)
-	g.mu.Unlock()
-	return nil
-}
-
 func (g *Gateway) resourceHandler(upstream string) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		s, err := g.session(upstream)
@@ -729,7 +534,7 @@ func (g *Gateway) removeFeatures(u *upstream) int {
 		delete(g.resources, uri)
 	}
 	u.tools, u.prompts, u.resources = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	u.held, u.names = nil, nil
+	u.held, u.names, u.reported = nil, nil, nil
 
 	g.mu.Unlock()
 

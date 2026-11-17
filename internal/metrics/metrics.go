@@ -99,7 +99,7 @@ func New(o Options) *Metrics {
 	}, []string{"outcome"})
 	m.toolEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "portcullis_tool_definitions_total",
-		Help: "Tool definitions checked, by result: pinned, changed, held or flagged.",
+		Help: "Tool, prompt and resource definitions checked, by result: pinned, changed, held or flagged.",
 	}, []string{"server", "result"})
 	m.disconnects = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "portcullis_upstream_disconnects_total",
@@ -131,7 +131,7 @@ func New(o Options) *Metrics {
 func (m *Metrics) Observe(e audit.Event, d gateway.Details) {
 	server := m.servers.get(e.Upstream)
 	if e.Direction == audit.Internal {
-		if result, ok := strings.CutPrefix(e.Method, "tool/"); ok {
+		if result, ok := strings.CutPrefix(e.Method, "definition/"); ok {
 			m.toolEvents.WithLabelValues(server, result).Inc()
 		} else if e.Method == "upstream/disconnected" {
 			m.disconnects.WithLabelValues(server).Inc()

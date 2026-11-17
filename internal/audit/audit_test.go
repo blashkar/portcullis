@@ -364,7 +364,7 @@ func TestFindingsAndHeldCalls(t *testing.T) {
 	}
 	for i, e := range []Event{
 		{Method: "tools/call", Tool: "fs__read_file", Findings: "redacted: github_token"},
-		{Method: "tool/changed", Direction: Internal, Tool: "m__add", Reason: "changed", IsError: true, Findings: "high sensitive-path in description"},
+		{Method: "definition/changed", Direction: Internal, Tool: "m__add", Reason: "changed", IsError: true, Findings: "high sensitive-path in description"},
 		{Method: "tools/call", Tool: "m__add", Decision: DecisionHeld, Reason: "changed", IsError: true},
 		{Method: "tools/call", Tool: "fs__list_directory"},
 	} {
@@ -377,7 +377,7 @@ func TestFindingsAndHeldCalls(t *testing.T) {
 		}
 	}
 	flagged, err := s.Events(ctx, Filter{Flagged: true})
-	if err != nil || len(flagged) != 2 || flagged[0].Findings != "redacted: github_token" || flagged[1].Method != "tool/changed" {
+	if err != nil || len(flagged) != 2 || flagged[0].Findings != "redacted: github_token" || flagged[1].Method != "definition/changed" {
 		t.Errorf("flagged = %+v, %v", flagged, err)
 	}
 	blocked, _ := s.Events(ctx, Filter{Blocked: true})

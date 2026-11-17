@@ -219,7 +219,7 @@ func shown(e audit.Event) bool {
 	switch e.Method {
 	case "tools/call", "prompts/get", "resources/read":
 		return e.Direction == audit.ClientToServer
-	case "tool/held", "tool/changed", "tool/flagged", "upstream/disconnected":
+	case audit.DefinitionHeld, audit.DefinitionChanged, audit.DefinitionFlagged, "upstream/disconnected":
 		return true
 	}
 	return false

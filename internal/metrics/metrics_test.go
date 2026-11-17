@@ -56,8 +56,8 @@ func TestObserve(t *testing.T) {
 	m.Observe(call("web__fetch", "", false), gateway.Details{Suspicious: true})
 	m.Observe(audit.Event{Direction: audit.ServerToClient, Method: "notifications/tools/list_changed"}, gateway.Details{})
 	m.Observe(audit.Event{Direction: audit.ClientToServer, Method: "made/up"}, gateway.Details{})
-	m.Observe(audit.Event{Direction: audit.Internal, Method: "tool/changed", Upstream: "fs", Tool: "fs__read_file"}, gateway.Details{})
-	m.Observe(audit.Event{Direction: audit.Internal, Method: "tool/pinned", Upstream: "fs", Tool: "fs__read_file"}, gateway.Details{})
+	m.Observe(audit.Event{Direction: audit.Internal, Method: "definition/changed", Upstream: "fs", Tool: "fs__read_file"}, gateway.Details{})
+	m.Observe(audit.Event{Direction: audit.Internal, Method: "definition/pinned", Upstream: "fs", Tool: "fs__read_file"}, gateway.Details{})
 	m.Observe(audit.Event{Direction: audit.Internal, Method: "upstream/disconnected", Upstream: "web", IsError: true}, gateway.Details{})
 
 	body := scrape(t, m)

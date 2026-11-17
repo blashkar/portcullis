@@ -78,7 +78,7 @@ func tell(e Event) story {
 	switch e.Method {
 	case "tools/call", "prompts/get", "resources/read":
 		return tellCall(e)
-	case "tool/changed":
+	case audit.DefinitionChanged:
 		kind := pin.KindOf(e.Tool)
 		return story{
 			title: e.Tool,
@@ -91,7 +91,7 @@ func tell(e Event) story {
 			by: "pinning", outcome: kind + " held until you approve the change",
 			explain: "The server changed this " + kind + " after it was approved. It is held back until you review the change.",
 		}
-	case "tool/held":
+	case audit.DefinitionHeld:
 		kind := pin.KindOf(e.Tool)
 		by := "pinning"
 		if strings.Contains(e.Reason, "poison") {
@@ -108,7 +108,7 @@ func tell(e Event) story {
 			verdict: capitalize(kind) + " held back", tone: toneBad, caught: true,
 			explain: "The agent isn't offered this " + kind + ". " + sentence(e.Reason),
 		}
-	case "tool/flagged":
+	case audit.DefinitionFlagged:
 		kind := pin.KindOf(e.Tool)
 		return story{
 			title: e.Tool,
@@ -362,7 +362,7 @@ func detailOf(e Event, s story) *detailView {
 		}
 	}
 	switch e.Method {
-	case "tool/changed", "tool/held", "tool/flagged":
+	case audit.DefinitionChanged, audit.DefinitionHeld, audit.DefinitionFlagged:
 		d.InputLabel = "The definition the server sent"
 	case "upstream/disconnected":
 		d.Explain += " " + sentence(e.Error)

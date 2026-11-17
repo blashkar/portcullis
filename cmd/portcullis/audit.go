@@ -347,11 +347,11 @@ func runAuditShow(cmd *cobra.Command, opts auditOptions, arg string) error {
 
 func status(e audit.Event) string {
 	switch {
-	case e.Method == "tool/changed" || e.Method == "tool/held":
+	case e.Method == audit.DefinitionChanged || e.Method == audit.DefinitionHeld:
 		return "held"
-	case e.Method == "tool/flagged":
+	case e.Method == audit.DefinitionFlagged:
 		return "flagged"
-	case e.Method == "tool/pinned":
+	case e.Method == audit.DefinitionPinned:
 		return "pinned"
 	case blocked(e):
 		return "blocked"

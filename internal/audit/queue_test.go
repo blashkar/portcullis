@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -244,5 +245,37 @@ func TestQueueTruncatesOnce(t *testing.T) {
 	got, _ := s.Events(context.Background(), Filter{})
 	if len(got) != 1 || got[0].Result != strings.Repeat("r", 10)+truncatedMarker {
 		t.Errorf("result = %q", got[0].Result)
+	}
+}
+
+// Events recorded under the method names earlier versions used read back
+// under today's, and a filter by either name finds both.
+func TestOldMethodNamesReadAsNew(t *testing.T) {
+	s, _ := openTestStore(t, 0)
+	ctx := context.Background()
+	startSession(t, s, "s", time.Now())
+	for _, m := range []string{"tool/changed", DefinitionChanged, "tool/pinned", "tools/call"} {
+		if err := s.Record(ctx, Event{SessionID: "s", Time: time.Now(), Direction: Internal, Method: m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := s.Events(ctx, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range all {
+		got = append(got, e.Method)
+	}
+	if want := []string{DefinitionChanged, DefinitionChanged, DefinitionPinned, "tools/call"}; !slices.Equal(got, want) {
+		t.Errorf("methods = %v; want %v", got, want)
+	}
+	for _, m := range []string{DefinitionChanged, "tool/changed"} {
+		if es, err := s.Events(ctx, Filter{Method: m}); err != nil || len(es) != 2 {
+			t.Errorf("filter %s: %d events, %v", m, len(es), err)
+		}
+	}
+	if es, _ := s.Events(ctx, Filter{Method: "tools/call"}); len(es) != 1 {
+		t.Errorf("filter tools/call: %d events", len(es))
 	}
 }

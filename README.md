@@ -316,7 +316,7 @@ The policy controls what the agent asks servers to do. These checks cover the ot
 
 ### Pinning tools, prompts and resources (rug pulls)
 
-The first time portcullis runs a server, it records the definition of each of its tools (description, title, schemas and annotations) in `portcullis.pins.json`. If a server later changes a tool, the tool is held back: it disappears from the client's tool list, and calls to it get an error (code `-32031`) explaining why and what to run. The change is recorded in the audit log as `tool/changed`.
+The first time portcullis runs a server, it records the definition of each of its tools (description, title, schemas and annotations) in `portcullis.pins.json`. If a server later changes a tool, the tool is held back: it disappears from the client's tool list, and calls to it get an error (code `-32031`) explaining why and what to run. The change is recorded in the audit log as `definition/changed`.
 
 A server's first run is the only time it's trusted on sight. Everything it offers then is pinned. A tool, prompt or resource it adds after that, later in the session or on a later run, is held as new until you approve it: a server that adds a tool to read your SSH keys next week has to get past you first. Each pin records which server offered it. Some limits:
 
@@ -325,7 +325,7 @@ A server's first run is the only time it's trusted on sight. Everything it offer
 - A server that offers nothing on its first run leaves nothing in the pin file, so its next run counts as its first.
 - If a server's first run fails partway, say its prompts were listed but its resources weren't, what wasn't listed is held as new on the next run. Approve it with `portcullis pin approve`.
 
-Prompts and resources are pinned the same way, since a client can show the model their descriptions too. A server could offer a harmless `summarize` prompt, then change it to ask the user for a GitHub token in a new argument. In the pin file and the `portcullis pin` commands, a prompt goes by `prompt:<name>`, such as `prompt:docs__summarize`, and a resource by `resource:<uri>`, such as `resource:notes://meeting`. A held prompt fails `prompts/get` and a held resource fails `resources/read`, both with the same error code. They're recorded with the same `tool/...` audit methods, under those names.
+Prompts and resources are pinned the same way, since a client can show the model their descriptions too. A server could offer a harmless `summarize` prompt, then change it to ask the user for a GitHub token in a new argument. In the pin file and the `portcullis pin` commands, a prompt goes by `prompt:<name>`, such as `prompt:docs__summarize`, and a resource by `resource:<uri>`, such as `resource:notes://meeting`. A held prompt fails `prompts/get` and a held resource fails `resources/read`, both with the same error code. They're recorded with the same `definition/...` audit methods, under those names. (Before this, these methods were named `tool/...`. Events recorded under the old names read back under the new ones, and `--method` finds both. Rows aren't rewritten, so a query run directly against the SQLite file still sees the old names on older rows.)
 
 You review and approve changes with `portcullis pin`, and a running `serve` picks up the approval within a couple of seconds:
 
@@ -370,7 +370,7 @@ Before a tool is offered, portcullis scans its description, title, and every str
 | `encoded-blob` | a long base64 or hex run | medium |
 | `long-description` | over 2,000 characters | low |
 
-With `scan.tools: hide` (the default), a tool, prompt or resource with a high-severity finding is held back; lower ones are logged and recorded as `tool/flagged`. Use `log` to only report, and `scan.ignore` for ones you've reviewed, such as `fs__*`, `prompt:docs__*` or `resource:notes://*`. Invisible characters are removed before the patterns run, so they can't be used to split up a phrase.
+With `scan.tools: hide` (the default), a tool, prompt or resource with a high-severity finding is held back; lower ones are logged and recorded as `definition/flagged`. Use `log` to only report, and `scan.ignore` for ones you've reviewed, such as `fs__*`, `prompt:docs__*` or `resource:notes://*`. Invisible characters are removed before the patterns run, so they can't be used to split up a phrase.
 
 These are heuristics, tuned against the reference servers: the scanner's tests check every tool of the filesystem, git and everything servers (captured from the sandbox), and the only finding is a medium one on `everything__get-env`, whose description does say it returns environment variables.
 
@@ -388,10 +388,10 @@ AWS_ACCESS_KEY_ID=[REDACTED:aws_access_key]
 DB_URL=postgres://app:[REDACTED:url_password]@db:5432/app
 
 $ portcullis audit --flagged
-TIME          DIRECTION       SERVER      METHOD        TOOL                 DURATION  POLICY  STATUS
-11:25:13.555  portcullis      everything  tool/flagged  everything__get-env  -         -       flagged
+TIME          DIRECTION       SERVER      METHOD              TOOL                 DURATION  POLICY  STATUS
+11:25:13.555  portcullis      everything  definition/flagged  everything__get-env  -         -       flagged
               findings: medium secrets in description: "environment variables"
-11:25:13.905  client->server  fs          tools/call    fs__read_text_file   1.852ms   allow   ok
+11:25:13.905  client->server  fs          tools/call          fs__read_text_file   1.852ms   allow   ok
               findings: redacted: aws_access_key, github_token, url_password
 ```
 

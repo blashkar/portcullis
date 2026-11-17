@@ -3,8 +3,10 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +36,7 @@ func TestExitDuringARefreshLeavesNothingBehind(t *testing.T) {
 		o.Observer = observerFunc(func(e audit.Event, _ Details) {
 			// Checking the new tool comes after the listing and before it
 			// is added: exit the upstream here.
-			if e.Method == "tool/pinned" && e.Tool == "m__late" {
+			if e.Method == "definition/pinned" && e.Tool == "m__late" {
 				once.Do(func() {
 					_ = h.upstream["m"].Close()
 					time.Sleep(50 * time.Millisecond) // time for the exit to be handled
@@ -111,4 +113,100 @@ func TestFailedConnectIsCleanedUp(t *testing.T) {
 		t.Fatalf("connecting again: %v", err)
 	}
 	eventually(t, "the tool to be offered", func() bool { return slices.Equal(h.toolNames(), []string{"d__search"}) })
+}
+
+// reportedFor returns how many reports the gateway remembers for the
+// upstream, in all and for one name.
+func reportedFor(h *harness, upstream, name string) (all, one int) {
+	h.gw.mu.Lock()
+	defer h.gw.mu.Unlock()
+	u := h.gw.upstreams[upstream]
+	for _, r := range u.reported {
+		all += len(r)
+	}
+	return all, len(u.reported[name])
+}
+
+// A server that keeps changing a definition, or offering new names, can't
+// grow what the gateway remembers about its reports without end; and
+// flipping back to a recent version isn't reported again.
+func TestReportsAreBounded(t *testing.T) {
+	m := newUpstream("math")
+	addTextTool(m, "add", "v0", "4")
+	h := startWith(t, map[string]*mcp.Server{"m": m}, func(o *Options) {
+		o.Pins = pin.Open(filepath.Join(t.TempDir(), "pins.json"), pin.TrustNew)
+	})
+	reportedAbout := func(method, tool, params string) func() bool {
+		return func() bool {
+			_, ok := h.rec.find(func(e audit.Event) bool {
+				return e.Method == method && e.Tool == tool && strings.Contains(e.Params, params)
+			})
+			return ok
+		}
+	}
+	for i := 1; i <= 10; i++ {
+		v := "v" + strconv.Itoa(i)
+		addTextTool(m, "add", v, "4")
+		eventually(t, "the change to "+v+" to be reported", reportedAbout(audit.DefinitionChanged, "m__add", `"`+v+`"`))
+	}
+	if _, n := reportedFor(h, "m", "m__add"); n > maxReports {
+		t.Errorf("%d reports remembered for one tool", n)
+	}
+
+	// Back to a recent version: no new report.
+	addTextTool(m, "add", "v9", "4")
+	addTextTool(m, "mark", "A marker.", "1")
+	eventually(t, "the marker to be reported", func() bool {
+		_, ok := h.rec.find(func(e audit.Event) bool { return e.Tool == "m__mark" })
+		return ok
+	})
+	if n := h.rec.count(func(e audit.Event) bool {
+		return e.Method == audit.DefinitionChanged && strings.Contains(e.Params, `"v9"`)
+	}); n != 1 {
+		t.Errorf("v9 reported %d times", n)
+	}
+
+	// Names offered and then withdrawn are forgotten.
+	for i := range 20 {
+		name := "t" + strconv.Itoa(i)
+		addTextTool(m, name, "Temporary.", "1")
+		eventually(t, name+" to be reported", reportedAbout(audit.DefinitionPinned, "m__"+name, ""))
+		m.RemoveTools(name)
+		eventually(t, name+" to be withdrawn", func() bool { _, n := reportedFor(h, "m", "m__"+name); return n == 0 })
+	}
+	if all, _ := reportedFor(h, "m", ""); all > 2*maxReports {
+		t.Errorf("%d reports remembered for two tools", all)
+	}
+}
+
+// A pin file that can't be read fails Connect before any listing, and
+// leaves nothing behind either.
+func TestUnreadablePinsCleanUpConnect(t *testing.T) {
+	pins := filepath.Join(t.TempDir(), "pins.json")
+	if err := os.WriteFile(pins, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := startWith(t, map[string]*mcp.Server{}, func(o *Options) {
+		o.Pins = pin.Open(pins, pin.HoldAfterFirst)
+	})
+	m := newUpstream("docs")
+	addTextTool(m, "search", "Searches the docs.", "ok")
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := m.Connect(h.ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.gw.Connect(h.ctx, "d", ct); err == nil {
+		t.Fatal("Connect succeeded with an unreadable pin file")
+	}
+	if sv := h.gw.Servers(); len(sv) != 0 {
+		t.Errorf("Servers = %+v", sv)
+	}
+	done := make(chan struct{})
+	go func() { _ = ss.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("the upstream's session is still open")
+	}
 }
