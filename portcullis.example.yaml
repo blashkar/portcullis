@@ -47,8 +47,8 @@ redact:
 # to give the AI instructions ("ignore previous instructions and ...").
 # Patterns run on everything; the guard model, a small local model through
 # Ollama, judges what they miss. If Ollama is down or slow, the patterns
-# carry on alone. warn puts a warning before the result, block withholds
-# it, log only records it.
+# carry on alone. warn (the default) puts a warning before the result but
+# still passes it to the model; block withholds it; log only records it.
 inject:
   action: warn
   guard:

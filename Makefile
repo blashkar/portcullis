@@ -9,15 +9,17 @@ build:
 test:
 	go test -race ./...
 
-# A short fuzzing pass over the JSON-RPC parser and line reader.
+# A short fuzzing pass over the parsers and checks that take outside input.
+# FUZZTIME sets how long each target runs.
+FUZZTIME ?= 30s
 fuzz:
-	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/jsonrpc
-	go test -run '^$$' -fuzz FuzzReader -fuzztime 30s ./internal/jsonrpc
-	go test -run '^$$' -fuzz FuzzDecodeArgs -fuzztime 30s ./internal/gateway
-	go test -run '^$$' -fuzz FuzzTool -fuzztime 30s ./internal/scan
-	go test -run '^$$' -fuzz FuzzRedact -fuzztime 30s ./internal/redact
-	go test -run '^$$' -fuzz FuzzHeuristics -fuzztime 30s ./internal/inject
-	go test -run '^$$' -fuzz FuzzPrefixWriter -fuzztime 30s ./cmd/portcullis
+	go test -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME) ./internal/jsonrpc
+	go test -run '^$$' -fuzz FuzzReader -fuzztime $(FUZZTIME) ./internal/jsonrpc
+	go test -run '^$$' -fuzz FuzzDecodeArgs -fuzztime $(FUZZTIME) ./internal/gateway
+	go test -run '^$$' -fuzz FuzzTool -fuzztime $(FUZZTIME) ./internal/scan
+	go test -run '^$$' -fuzz FuzzRedact -fuzztime $(FUZZTIME) ./internal/redact
+	go test -run '^$$' -fuzz FuzzHeuristics -fuzztime $(FUZZTIME) ./internal/inject
+	go test -run '^$$' -fuzz FuzzPrefixWriter -fuzztime $(FUZZTIME) ./cmd/portcullis
 
 lint:
 	golangci-lint run
