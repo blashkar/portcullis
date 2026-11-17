@@ -64,9 +64,7 @@ func (g *Gateway) checkToolResult(ctx context.Context, tool string, res *mcp.Cal
 	}
 	switch g.opts.Inject.Action {
 	case InjectBlock:
-		if n := noteFrom(ctx); n != nil {
-			n.withheld = true
-		}
+		g.noteWithheld(ctx, res)
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: injectWithheld}}}
 	case InjectLog:
 		return res
@@ -92,9 +90,7 @@ func (g *Gateway) checkResource(ctx context.Context, uri string, res *mcp.ReadRe
 	v := d.Check(ctx, strings.Join(texts, "\n"))
 	g.noteInjection(ctx, uri, v)
 	if v.Injection && g.opts.Inject.Action == InjectBlock {
-		if n := noteFrom(ctx); n != nil {
-			n.withheld = true
-		}
+		g.noteWithheld(ctx, res)
 		return &withheldError{what: "resource"}
 	}
 	return nil
@@ -135,9 +131,7 @@ func (g *Gateway) checkError(ctx context.Context, what string, err error) error 
 	}
 	switch g.opts.Inject.Action {
 	case InjectBlock:
-		if n := noteFrom(ctx); n != nil {
-			n.withheld = true
-		}
+		g.noteWithheld(ctx, out.Message)
 		out.Message = strings.Replace(injectWithheld, "This tool result", "The server's error message", 1)
 	case InjectLog:
 	default:
@@ -169,9 +163,7 @@ func (g *Gateway) checkPrompt(ctx context.Context, name string, res *mcp.GetProm
 	}
 	switch g.opts.Inject.Action {
 	case InjectBlock:
-		if n := noteFrom(ctx); n != nil {
-			n.withheld = true
-		}
+		g.noteWithheld(ctx, res)
 		return &withheldError{what: "prompt"}
 	case InjectLog:
 	default:
@@ -179,6 +171,25 @@ func (g *Gateway) checkPrompt(ctx context.Context, name string, res *mcp.GetProm
 		res.Messages = append([]*mcp.PromptMessage{warning}, res.Messages...)
 	}
 	return nil
+}
+
+// noteWithheld notes that v, a result or an error's text, was withheld as
+// an injection. It has been redacted already. The audit log keeps it, so a
+// person can see what was held back; it never reaches the client.
+func (g *Gateway) noteWithheld(ctx context.Context, v any) {
+	n := noteFrom(ctx)
+	if n == nil {
+		return
+	}
+	n.withheld = true
+	if g.opts.Recorder == nil {
+		return
+	}
+	if s, ok := v.(string); ok {
+		n.withheldText = s
+	} else {
+		n.withheldText = marshal(v)
+	}
 }
 
 // withheldError is the error for a resource or prompt withheld as an

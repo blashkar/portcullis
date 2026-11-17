@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -49,7 +51,8 @@ it shows the most recent session; --session all searches every session.`,
   portcullis audit --blocked --session all
   portcullis audit --log-only        # what log_only rules would have changed
   portcullis audit --flagged --session all   # redactions, flagged and held tools
-  portcullis audit sessions`,
+  portcullis audit sessions
+  portcullis audit show 42           # one message in full, with anything withheld`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAudit(cmd, opts)
@@ -75,6 +78,20 @@ it shows the most recent session; --session all searches every session.`,
 	f.DurationVar(&opts.since, "since", 0, "only messages from this long ago, such as 1h")
 	f.BoolVarP(&opts.payloads, "payloads", "p", false, "show each message's params and result")
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show ID",
+		Short: "Show one message in full, with anything withheld from the client",
+		Long: `show prints one recorded message in full: its params, result, error and
+findings. If portcullis withheld the message's result from the client as a
+prompt injection, show prints what was withheld, redacted, and only here:
+lists and --json don't include it. It may hold instructions meant for a model,
+so read it yourself rather than passing it to one. Find a message's ID with
+--json.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAuditShow(cmd, opts, args[0])
+		},
+	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "sessions",
 		Short: "List recorded sessions, newest first",
@@ -161,6 +178,9 @@ func runAudit(cmd *cobra.Command, opts auditOptions) error {
 		}
 		if e.Findings != "" {
 			details[i] = append(details[i], "findings: "+e.Findings)
+		}
+		if e.HasWithheld {
+			details[i] = append(details[i], fmt.Sprintf("withheld: kept; see portcullis audit show %d", e.ID))
 		}
 		if opts.payloads {
 			if e.Params != "" {
@@ -271,11 +291,58 @@ func eventJSON(e audit.Event) any {
 		Would     string    `json:"log_only_decision,omitempty"`
 		WouldRule string    `json:"log_only_rule,omitempty"`
 		Findings  string    `json:"findings,omitempty"`
+		// Whether something was withheld; what it was is only in show.
+		Withheld bool `json:"withheld,omitempty"`
 	}{
 		e.ID, e.SessionID, e.Time, e.Direction, e.Upstream, e.Method, e.Tool, raw(e.Params), raw(e.Result),
 		e.Error, e.IsError, float64(e.Duration.Microseconds()) / 1000,
-		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings,
+		e.Decision, e.Rule, e.Reason, e.WouldDecision, e.WouldRule, e.Findings, e.HasWithheld,
 	}
+}
+
+func runAuditShow(cmd *cobra.Command, opts auditOptions, arg string) error {
+	if opts.asJSON {
+		return errors.New("show prints text only, so what was withheld is never machine-read; use audit --json for JSON")
+	}
+	id, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil || id <= 0 {
+		return fmt.Errorf("%q isn't a message ID; find one with portcullis audit --json", arg)
+	}
+	store, err := openAuditDB(opts)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	e, err := store.Event(cmd.Context(), id)
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	field := func(name, v string) {
+		if v != "" {
+			fmt.Fprintf(out, "%-10s %s\n", name+":", clean(v))
+		}
+	}
+	field("id", strconv.FormatInt(e.ID, 10))
+	field("session", e.SessionID)
+	field("time", e.Time.Local().Format("2006-01-02 15:04:05.000"))
+	field("direction", e.Direction)
+	field("server", e.Upstream)
+	field("method", e.Method)
+	field("tool", e.Tool)
+	field("duration", formatDuration(e.Duration))
+	field("policy", policyText(e))
+	field("status", status(e))
+	field("reason", e.Reason)
+	field("findings", e.Findings)
+	field("params", e.Params)
+	field("result", e.Result)
+	field("error", e.Error)
+	if e.Withheld != "" {
+		fmt.Fprintln(out, "\nwithheld from the client as a prompt injection (redacted; don't pass it to a model):")
+		fmt.Fprintln(out, clean(e.Withheld))
+	}
+	return nil
 }
 
 func status(e audit.Event) string {

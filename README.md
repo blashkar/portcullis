@@ -418,7 +418,7 @@ inject:
     timeout: 15s
 ```
 
-With `warn`, the result gets a fixed warning in front, telling the model it's data and not instructions. The warning never quotes the guard's reason or the matched text, because both come from the tool result and the warning is the part the model should trust. With `block`, the model gets a tool error instead, saying the result was withheld. The audit log records what the checks found, with the matched text shortened, but not the withheld result itself. With `log`, nothing changes but the audit log records it (`portcullis audit --flagged`).
+With `warn`, the result gets a fixed warning in front, telling the model it's data and not instructions. The warning never quotes the guard's reason or the matched text, because both come from the tool result and the warning is the part the model should trust. With `block`, the model gets a tool error instead, saying the result was withheld. The audit log records what the checks found, with the matched text shortened, and keeps the withheld result, redacted, apart from the rest: `portcullis audit` marks the message, and only `portcullis audit show <id>` prints what was withheld. IDs can be reused once retention has deleted every event, so look one up again rather than keeping it. Lists, `--json`, the dashboard and the metrics never include it, since it may be instructions aimed at a model. With `log`, nothing changes but the audit log records it (`portcullis audit --flagged`).
 
 Prompts are checked differently, because a prompt template is instructions by design: "You are now a code reviewer; use the git_diff tool" is what prompts are for. They get only the patterns, never the guard model, and not the ones that flag giving the assistant a persona, addressing it or naming tools. Hidden text, "don't tell the user", chat-template tokens, overriding earlier instructions and data-carrying URLs still count. A prompt judged an injection is withheld with `block`, or gets the warning as an extra message in front with `warn`.
 
@@ -441,6 +441,9 @@ I tried prompts that push `llama3.2:3b` harder: quote the suspicious sentence fi
 ## Audit log
 
 `serve` records every message in a SQLite database: the session, direction, server, method, tool, the params, the result and any error (up to `audit.max_payload` bytes each, 64 KiB by default, cut between characters), how long it took, and the policy's decision. The file is created with mode `0600`, since it holds tool arguments and results. `portcullis audit` searches it.
+
+- **Retention:** events older than `audit.retention` (90 days by default; a number of days such as `30d`, a duration such as `720h`, or `0` to keep everything) are deleted when `serve` starts and every hour after, along with sessions that ended and have no events left. A running session keeps its record however long it's idle; one that never ended because `serve` crashed goes 30 days after the cutoff. They're deleted a few thousand at a time, so calls keep being recorded meanwhile. The file doesn't shrink; SQLite reuses the space.
+- **Writes happen in the background,** so a call doesn't wait for the disk. Events aren't dropped for lack of room: if 1,024 are already waiting, the next call waits. Everything waiting is written before `serve` exits; a `serve` that is killed loses what hadn't been written yet.
 
 These are from a real run of the example config against the three sandboxed servers, with nine calls, some of them chosen to be blocked:
 
@@ -474,6 +477,7 @@ portcullis audit --log-only                                 # calls a log_only r
 portcullis audit --flagged --session all                    # redactions, injections, and flagged, held or changed tools
 portcullis audit --failed                                   # failed and blocked calls
 portcullis audit --json | jq .                              # JSON lines, params and results as JSON
+portcullis audit show 42                                    # one message in full, with anything withheld from the client
 ```
 
 A call the policy stopped, or one to a held tool, is `blocked`; one the tool itself rejected, like the filesystem server refusing a path, is `failed`; a protocol error, like an unknown tool, is `error: ...`. When portcullis stops a server, that's `upstream/closed`; a server that dies on its own is a failed `upstream/disconnected`.

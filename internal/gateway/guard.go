@@ -50,6 +50,8 @@ type callNote struct {
 	injection string
 	injected  bool
 	withheld  bool // the result was withheld as an injection
+	// withheldText is what was withheld, redacted, for the audit log.
+	withheldText string
 	// approval is how a call that needed a person's approval ended.
 	approval approval.Outcome
 }

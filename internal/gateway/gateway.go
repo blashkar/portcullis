@@ -91,6 +91,9 @@ type Gateway struct {
 	client    *mcp.ServerSession
 	gotClient bool
 	closing   bool // Close was called, so upstreams exiting is expected
+	// exits tracks the goroutines that handle upstreams exiting, so Close
+	// can wait for them to record it.
+	exits sync.WaitGroup
 	// reported holds the tool reports already made, so each is made once.
 	reported map[string]bool
 	// inFlight counts, per upstream, the progress tokens of requests
@@ -212,10 +215,10 @@ func (g *Gateway) Connect(ctx context.Context, name string, t mcp.Transport) err
 		g.mu.Unlock()
 		return fmt.Errorf("listing %s's features: %w", name, err)
 	}
-	go func() {
+	g.exits.Go(func() {
 		err := session.Wait()
 		g.upstreamExited(u, err)
-	}()
+	})
 	g.log.Info("upstream connected", "upstream", name, "tools", len(u.tools), "prompts", len(u.prompts), "resources", len(u.resources))
 	return nil
 }
@@ -246,6 +249,9 @@ func (g *Gateway) Close() error {
 		wg.Go(func() { errs[i] = s.Close() })
 	}
 	wg.Wait()
+	// Each exit is recorded before Close returns, while the audit log is
+	// still open.
+	g.exits.Wait()
 	return errors.Join(errs...)
 }
 
@@ -815,6 +821,7 @@ func (g *Gateway) observe(dir string) mcp.Middleware {
 				findings = append(findings, note.injection)
 			}
 			e.Findings = strings.Join(findings, "; ")
+			e.Withheld = note.withheldText
 			g.logEvent(e)
 			g.record(context.WithoutCancel(ctx), e, note.details())
 			return res, err
@@ -878,12 +885,21 @@ func (g *Gateway) logEvent(e audit.Event) {
 func (g *Gateway) record(ctx context.Context, e audit.Event, d Details) {
 	e.SessionID = g.opts.SessionID
 	if g.opts.Observer != nil {
-		g.opts.Observer.Observe(e, d)
+		// What was withheld stays in the audit log: the dashboard and
+		// metrics don't need it, and it may be aimed at a model.
+		o := e
+		o.Withheld = ""
+		g.opts.Observer.Observe(o, d)
 	}
 	if g.opts.Recorder == nil {
 		return
 	}
 	if err := g.opts.Recorder.Record(ctx, e); err != nil {
+		if errors.Is(err, audit.ErrClosed) {
+			// Shutting down: an upstream exiting after the log closed.
+			g.log.Debug("audit log closed", "method", e.Method, "upstream", e.Upstream)
+			return
+		}
 		g.log.Error("writing the audit log", "err", err)
 	}
 }
