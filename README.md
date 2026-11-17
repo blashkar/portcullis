@@ -410,13 +410,15 @@ Structured content is checked string by string, keys included, not as encoded JS
 
 ```yaml
 inject:
-  action: warn          # warn, block, log or off
+  action: warn          # the default; warn, block, log or off
   guard:
     enabled: true
     model: gemma3:4b
     check: all          # every result, or only those a pattern noticed (suspicious)
     timeout: 15s
 ```
+
+**The default is `warn`, which still passes the result to the model.** A warning lowers the odds that the model follows the injected text but doesn't remove them: a model can ignore the warning, and the guard model or patterns may be wrong in either direction. Set `action: block` if a result judged an injection should never reach the model. `warn` is the default because a false alarm under `block` hides a legitimate result, which is costly while the checks are this young.
 
 With `warn`, the result gets a fixed warning in front, telling the model it's data and not instructions. The warning never quotes the guard's reason or the matched text, because both come from the tool result and the warning is the part the model should trust. With `block`, the model gets a tool error instead, saying the result was withheld. The audit log records what the checks found, with the matched text shortened, and keeps the withheld result, redacted, apart from the rest: `portcullis audit` marks the message, and only `portcullis audit show <id>` prints what was withheld. IDs can be reused once retention has deleted every event, so look one up again rather than keeping it. Lists, `--json`, the dashboard and the metrics never include it, since it may be instructions aimed at a model. With `log`, nothing changes but the audit log records it (`portcullis audit --flagged`).
 
@@ -601,7 +603,7 @@ For `wrap`, the single-server mode:
 ```sh
 make test   # go test -race ./...
 make lint   # golangci-lint
-make fuzz   # short fuzzing pass over the JSON-RPC parser, line reader, argument decoding, scanner, redactor and injection patterns
+make fuzz   # short fuzzing pass (FUZZTIME=30s each; CI runs it on every PR) over the JSON-RPC parser, line reader, argument decoding, scanner, redactor and injection patterns
 make vuln   # govulncheck
 make sandbox && sandbox/check.sh filesystem   # build and verify the sandboxed servers
 make demo   # the malicious-server demo
